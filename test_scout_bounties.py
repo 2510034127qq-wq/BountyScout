@@ -523,6 +523,109 @@ class TriageAndStateTests(unittest.TestCase):
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate["payment_method"], "Stripe")
 
+    def test_issue_6_product_payment_flows_are_not_contributor_payouts(self):
+        cases = (
+            (
+                "Link popup PaymentSheet silently cancels",
+                "Fix the PaymentSheet callback after a customer PaymentIntent destination charge. Submit a PR.",
+            ),
+            (
+                "Platform-fee charge used live mode",
+                "A test claim charged a real card $180.54 plus a $175 platform fee. Implement the fix.",
+            ),
+            (
+                "Batch proof endpoint charges once",
+                "The paid API endpoint charges $0.008 even though pricing is per proof. "
+                "Fix x-payment-info and add regression tests.",
+            ),
+            (
+                "Payment spec replay bug",
+                "A paid resource can be replayed after a card charge. Correct the payment intent spec in a PR.",
+            ),
+        )
+        for index, (title, text) in enumerate(cases):
+            with self.subTest(title=title):
+                item = {"title": title, "body": text, "labels": []}
+                self.assertFalse(scout.has_issue_reward_offer(item))
+                self.assertIsNone(
+                    scout.analyze_candidate(
+                        title,
+                        "example/product",
+                        f"https://github.com/example/product/issues/{30 + index}",
+                        "GitHub Issue",
+                        text,
+                        now=NOW,
+                        reward_offer_confirmed=True,
+                    )
+                )
+
+        actual_bounty = (
+            "Bounty: $80. Fix the PaymentSheet callback. "
+            "Contributors are paid via Stripe after the pull request is merged."
+        )
+        candidate = scout.analyze_candidate(
+            "[BOUNTY] Fix PaymentSheet callback",
+            "example/product",
+            "https://github.com/example/product/issues/40",
+            "GitHub Issue",
+            actual_bounty,
+            now=NOW,
+        )
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["reward"], "$80")
+        self.assertEqual(candidate["payment_method"], "Stripe")
+
+    def test_issue_6_financial_facts_are_not_reward_amounts(self):
+        cases = (
+            (
+                "UK source packages: funded early-years facts",
+                "Package publisher facts: Government top-up paid £632,200,000 and market size £14 billion. "
+                "Add the source package and run validation.",
+            ),
+            (
+                "Proper DROP modeling for all plans",
+                "Implement actuarial assumptions for pension benefit values of $18.98 and $64. "
+                "Submit a pull request with the model checks.",
+            ),
+            (
+                "Correct customer balance",
+                "The customer balance shows $500 after payment. Fix the accounting state and add tests.",
+            ),
+        )
+        for index, (title, text) in enumerate(cases):
+            with self.subTest(title=title):
+                self.assertFalse(scout.has_issue_reward_offer({"title": title, "body": text, "labels": []}))
+                self.assertIsNone(
+                    scout.analyze_candidate(
+                        title,
+                        "example/finance",
+                        f"https://github.com/example/finance/issues/{50 + index}",
+                        "GitHub Issue",
+                        text,
+                        now=NOW,
+                        reward_offer_confirmed=True,
+                    )
+                )
+
+    def test_paid_bounty_is_kept_but_unrelated_business_limit_is_not_reward(self):
+        text = """
+        Recruitly offers 75% off to agencies with less than $500,000 in annual revenue.
+        Add one missing YAML record and run the repository verifier.
+        This is a focused, data-only contribution under paid Frantic bounty 120.
+        """
+        item = {"title": "Missing record: Recruitly Startup Program", "body": text, "labels": []}
+        self.assertTrue(scout.has_issue_reward_offer(item))
+        candidate = scout.analyze_candidate(
+            item["title"],
+            "sourcey/startup-credits",
+            "https://github.com/sourcey/startup-credits/issues/917",
+            "GitHub Issue",
+            text,
+            now=NOW,
+        )
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["reward"], "金额待确认")
+
     def test_generic_backing_templates_need_current_funding_evidence(self):
         templates = (
             "Everyone can add rewards. Fix the parser and submit a PR.",

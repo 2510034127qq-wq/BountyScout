@@ -227,6 +227,14 @@ PRODUCT_BILLING_TERMS = (
     "stripe credit pack",
     "stripe-metered",
     "stripe_payment_id",
+    "paymentsheet",
+    "payment intent",
+    "paymentintent",
+    "destination charge",
+    "platform fee",
+    "application fee",
+    "card charge",
+    "charged a real card",
     "subscription price",
     "subscription tier",
     "credit pack",
@@ -237,6 +245,21 @@ PRODUCT_BILLING_TERMS = (
     "billable tool",
     "api usage price",
     "tool usage price",
+    "paid api",
+    "paid resource",
+    "endpoint charges",
+    "pricing is per",
+    "price per proof",
+    "x-payment-info",
+)
+NON_REWARD_FINANCIAL_PATTERNS = (
+    r"\bgovernment (?:funding|top-up|spending|expenditure)\b",
+    r"\bmarket size\b",
+    r"\bannual revenue\b",
+    r"\b(?:financial|actuarial|economic) assumptions?\b",
+    r"\b(?:publisher|source) (?:facts?|figures?|cells?|values?)\b",
+    r"\b(?:customer|account) (?:balance|billing|charge|payment)\b",
+    r"\b(?:benefit|entitlement|pension) (?:amount|value|income|payment|funding)\b",
 )
 PAYMENT_METHOD_PATTERNS = (
     ("PayPal", r"\bpaypal\b"),
@@ -552,7 +575,9 @@ def extract_reward_amounts(text):
         if any(term in lower for term in REWARD_INTENT_TERMS):
             selected.update(range(index, min(len(lines), index + 2)))
     focused = "\n".join(lines[index] for index in sorted(selected))
-    return extract_amounts(focused) or extract_amounts(text)
+    # If the source has explicit reward wording, unrelated prices elsewhere in
+    # the page must not become the fallback bounty amount.
+    return extract_amounts(focused) if selected else extract_amounts(text)
 
 
 def has_explicit_no_current_reward(text):
@@ -618,6 +643,44 @@ def has_current_reward_evidence(text, reward_label=False):
     )
 
 
+def has_direct_contributor_offer_evidence(text):
+    """Recognize a payout specifically offered for completing a contribution."""
+    contributor = (
+        r"(?:contributors?|submitters?|participants?|entrants?|winners?"
+        r"|accepted (?:pr|pull request|submission)|merged? (?:pr|pull request))"
+    )
+    payout = r"(?:claim|earn|receive (?:a |the )?(?:cash|payment|payout)|get paid|be paid|paid|payout|compensation)"
+    return bool(
+        re.search(contributor + r".{0,180}\b" + payout + r"\b", text, re.IGNORECASE | re.DOTALL)
+        or re.search(
+            r"\b(?:paid|payment|payout|compensation)\b.{0,80}\b(?:after|upon)\s+(?:the\s+)?"
+            r"(?:merge|acceptance|accepted (?:pr|pull request)|completion)\b",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        or re.search(
+            r"\b(?:payment|payout|compensation)\b.{0,80}\b(?:to|for)\s+" + contributor + r"\b",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
+def has_direct_bounty_offer_evidence(text):
+    """Return true for a current/direct task offer rather than monetary context."""
+    return bool(
+        has_current_reward_evidence(text)
+        or has_direct_contributor_offer_evidence(text)
+        or re.search(
+            r"(?:^|\n)\s*(?:#{1,6}\s*)?(?:\[[^]]+\]\s*)?(?:bounty|cash prize|cash reward)\s*[:–—-]"
+            r"|\bpaid\b.{0,50}\bbounty\b"
+            r"|\b(?:claim|earn)\b.{0,80}\b(?:the\s+)?bounty\b",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
 def is_historical_reward_summary(title, text):
     title_lower = title.lower()
     if re.search(
@@ -642,16 +705,14 @@ def is_product_billing_only(text):
     lower = text.lower()
     if not any(term in lower for term in PRODUCT_BILLING_TERMS):
         return False
-    contributor_payout = re.search(
-        r"\b(?:contributors?|submitters?|winners?|accepted (?:pr|pull request)|merged? (?:pr|pull request))\b"
-        r".{0,180}\b(?:paid|payment|payout|compensation|cash reward)\b"
-        r"|\b(?:paid|payment|payout|compensation|cash reward)\b.{0,180}"
-        r"\b(?:contributors?|submitters?|winners?|accepted (?:pr|pull request)|after merge)\b"
-        r"|(?:^|\n)\s*(?:#{1,6}\s*)?(?:bounty|reward)\s*[:–—-].{0,160}",
-        text,
-        re.IGNORECASE | re.DOTALL,
-    )
-    return not bool(contributor_payout)
+    return not has_direct_bounty_offer_evidence(text)
+
+
+def is_non_reward_financial_context(text):
+    """Reject business/statistical money figures without a contributor offer."""
+    if has_direct_bounty_offer_evidence(text):
+        return False
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in NON_REWARD_FINANCIAL_PATTERNS)
 
 
 def is_discovery_source_document(text):
@@ -755,7 +816,7 @@ def has_task_contributor_reward_link(text, reward_label=False):
         return True
 
     reward_heading = r"(?:^|\n)\s*(?:[^\w\n]{0,4}\s*)?reward\s*(?::|[-–—]|\n)"
-    coding_action = r"\b(?:fix|implement|add|create|write|test|document)\b|修复|实现|编写|测试|文档"
+    coding_action = r"(?:\b(?:fix|implement|add|create|write|test|document)\b|修复|实现|编写|测试|文档)"
     if re.search(reward_heading + r".{0,300}" + coding_action, lower, re.DOTALL) or re.search(
         coding_action + r".{0,300}" + reward_heading,
         lower,
@@ -768,12 +829,13 @@ def has_task_contributor_reward_link(text, reward_label=False):
         r"|accepted reports?|merge[sd]?|contribut(?:e|ion|ors?)|提交|贡献|合并|作者|参与者)"
     )
     reward = (
-        r"(?:claim|earn|receive|get paid|be paid|award(?:ed)?|reward(?:ed)?|bounty|prize|payment|payout"
+        r"(?:claim|earn|get paid|be paid|award(?:ed)?|reward(?:ed)?|bounty|prize|payout"
         r"|compensation|奖励|发放)"
     )
     return bool(
         re.search(contribution + r".{0,240}" + reward, lower, re.DOTALL)
         or re.search(reward + r".{0,240}" + contribution, lower, re.DOTALL)
+        or has_direct_contributor_offer_evidence(text)
     )
 
 
@@ -1209,6 +1271,8 @@ def analyze_candidate(
         return reject("historical reward")
     if is_product_billing_only(text):
         return reject("product billing")
+    if is_non_reward_financial_context(text):
+        return reject("non-reward financial")
     if source == "Repository Markdown" and is_discovery_source_document(text):
         return reject("discovery source")
     if any(term in lower for term in SPAM_TERMS + JOB_TERMS):
