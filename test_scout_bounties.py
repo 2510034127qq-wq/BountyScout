@@ -94,6 +94,9 @@ class CandidateAnalysisTests(unittest.TestCase):
     def test_rejects_costs_and_nonexistent_bounty_programs(self):
         cases = [
             "Engineering challenge: reduce AWS WAF cost from $5.00 by applying a custom rule.",
+            "Payment processing bug: the account balance shows $500. Fix the balance display.",
+            "Product price is $99. Implement the missing checkout label.",
+            "Tutorial: set the demo account balance to $100 and add an assertion.",
             "Please report security bugs. We do not offer a bug bounty program or cash rewards.",
             "Please report security bugs. I can't offer any cash prize, but I can send swag.",
             "A platform for discovering paid contribution opportunities and browsing bounty issues.",
@@ -171,6 +174,42 @@ class CandidateAnalysisTests(unittest.TestCase):
         )
         self.assertEqual(candidate["reward"], "$15 USD")
 
+    def test_non_cash_only_rewards_are_filtered(self):
+        rewards = (
+            "Reward: a $50 gift card after the PR is merged.",
+            "Reward: 500 points after the PR is merged.",
+            "Reward: a completion certificate after the PR is merged.",
+            "Reward: a physical prize after the PR is merged.",
+        )
+        for index, reward in enumerate(rewards):
+            with self.subTest(reward=reward):
+                text = f"{reward}\nFix one parser edge case and submit a pull request."
+                self.assertTrue(scout.non_cash_reward_types(text))
+                self.assertIsNone(
+                    scout.analyze_candidate(
+                        "[BOUNTY] Small parser fix",
+                        "example/parser",
+                        f"https://github.com/example/parser/issues/{index}",
+                        "GitHub Issue",
+                        text,
+                        now=NOW,
+                    )
+                )
+
+    def test_explicit_cash_alternative_keeps_mixed_reward(self):
+        text = "Reward: a $50 gift card or $50 paid via PayPal after merge. Fix the parser and submit a pull request."
+        candidate = scout.analyze_candidate(
+            "[BOUNTY] Small parser fix",
+            "example/parser",
+            "https://github.com/example/parser/issues/90",
+            "GitHub Issue",
+            text,
+            now=NOW,
+        )
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["reward"], "$50")
+        self.assertEqual(candidate["payment_method"], "PayPal")
+
     def test_rejects_jobs_large_events_and_expired_deadlines(self):
         cases = [
             "Paid challenge with a $500 salary range. We are hiring for a full-time role.",
@@ -243,6 +282,95 @@ class TriageAndStateTests(unittest.TestCase):
         self.assertFalse(scout.has_issue_reward_offer(discussed_only))
         self.assertFalse(scout.has_issue_reward_offer(paused))
         self.assertFalse(scout.has_issue_reward_offer(submitted_claim))
+
+    def test_real_game_economy_issues_are_not_bounty_offers(self):
+        issues = (
+            {
+                "title": "fix!(lua.endpoints): cash_out fires before round-eval rows commit — rewards under-collected, sometimes $0",
+                "body": (
+                    "Calling cash_out as soon as the game reaches ROUND_EVAL collects less money than the game owes — "
+                    "usually short exactly one blind reward ($3/$4/$5), and $0 in the worst case.\n"
+                    "The dollar rows (blind reward, interest, per-joker payouts) are still being committed.\n"
+                    "Suggested Fix: wait until the round-eval UI has finished creating its rows."
+                ),
+                "labels": [],
+                "url": "https://github.com/coder/balatrobot/issues/231",
+                "project": "coder/balatrobot",
+            },
+            {
+                "title": "bug: leaderboard runs affected by two balatrobot defects — economy short-collected",
+                "body": (
+                    "The cash_out race collects one blind reward short ($3/$4/$5), or $0 when the payout is only the "
+                    "reward row. Several dataset runs die in the shop on purchases they could have afforded.\n"
+                    "Suggested Fixes: pick up the balatrobot fixes when they land."
+                ),
+                "labels": [],
+                "url": "https://github.com/coder/balatrollm/issues/85",
+                "project": "coder/balatrollm",
+            },
+            {
+                "title": "Onboarding",
+                "body": (
+                    "Minecraft tutorial challenge: Sell $1,500 worth of crops. Player reaches a balance of $1,500.\n"
+                    "Once all five challenges have been completed, reward player with 1 Frontier Key and $10,000."
+                ),
+                "labels": [],
+                "url": "https://github.com/surf-sound/lifestealz/issues/10",
+                "project": "surf-sound/lifestealz",
+            },
+        )
+        for item in issues:
+            with self.subTest(url=item["url"]):
+                self.assertFalse(scout.has_issue_reward_offer(item))
+                text = "\n".join((item["title"], item["body"]))
+                self.assertIsNone(
+                    scout.analyze_candidate(
+                        item["title"],
+                        item["project"],
+                        item["url"],
+                        "GitHub Issue",
+                        text,
+                        now=NOW,
+                    )
+                )
+
+    def test_real_jd_card_reward_extracts_amount_but_is_filtered(self):
+        item = {
+            "title": "[Reward] HarnessClaw 体验测评（任一场景） #2",
+            "body": """
+            ### Task description
+            提交方式：开一个 PR，把测评内容写成 markdown，合并后发放奖励。
+            为了保证奖励真正发给用过 HarnessClaw 的人，PR 需要满足审核标准。
+
+            奖励形式：京东卡（人民币 100 元等值），在 PR 合并后与作者联系发放。
+
+            ### Reward currency
+            CNY RMB
+
+            ### Reward amount
+            100
+
+            ### Reward payer
+            FenjuFu
+            """,
+            "labels": [{"name": "good first issue"}, {"name": "reward"}],
+            "url": "https://github.com/harnessclaw/harnessclaw/issues/66",
+        }
+        text = "\n".join((item["title"], item["body"]))
+        self.assertTrue(scout.has_issue_reward_offer(item))
+        self.assertEqual(scout.extract_reward_amounts(text), ["100 RMB"])
+        self.assertEqual(scout.non_cash_reward_types(text), ["京东卡"])
+        self.assertIsNone(
+            scout.analyze_candidate(
+                item["title"],
+                "harnessclaw/harnessclaw",
+                item["url"],
+                "GitHub Issue",
+                text,
+                now=NOW,
+                reward_offer_confirmed=True,
+            )
+        )
 
     def test_rejects_crypto_only_payments(self):
         assets = ("USDC", "USDT", "BTC", "sats", "Lightning", "ETH", "SOL", "XLM", "DAI", "RTC")

@@ -91,6 +91,13 @@ STRONG_REWARD_TERMS = (
 )
 GENERIC_REWARD_TERMS = ("reward", "prize", "payment", "payout", "compensation")
 REWARD_INTENT_TERMS = ("bounty", "reward", "prize", "payout", "cash", "paid", "compensation", "winner")
+NON_CASH_REWARD_PATTERNS = (
+    ("京东卡", r"京东卡"),
+    ("礼品卡", r"礼品卡|购物卡|代金券|\bgift cards?\b|\bstore credits?\b|\bvouchers?\b"),
+    ("积分", r"积分|\bpoints?\b|\bcredits?\b"),
+    ("证书", r"证书|\bcertificates?\b"),
+    ("实物", r"实物|奖品|\bswag\b|\bmerch(?:andise)?\b|\bphysical (?:gift|prize|item)\b"),
+)
 MICRO_TASK_TERMS = (
     "good first issue",
     "beginner friendly",
@@ -470,8 +477,32 @@ def extract_amounts(text):
     return amounts[:4]
 
 
+def extract_structured_reward_amount(text):
+    """Read common Reward currency / Reward amount field pairs."""
+    text = "\n".join(clean_line(line.lstrip()) for line in text.splitlines())
+    currency_match = re.search(
+        r"(?:^|\n)\s*(?:reward currency|奖励币种)\s*:?[ \t]*\n\s*([A-Z]{3}(?:\s+[A-Z]{3})?|人民币|RMB|CNY)",
+        text,
+        re.IGNORECASE,
+    )
+    amount_match = re.search(
+        r"(?:^|\n)\s*(?:reward amount|奖励金额)\s*:?[ \t]*\n\s*(\d[\d,]*(?:\.\d+)?)",
+        text,
+        re.IGNORECASE,
+    )
+    if not currency_match or not amount_match:
+        return ""
+    currency_text = currency_match.group(1).upper()
+    if "RMB" in currency_text or "CNY" in currency_text or "人民币" in currency_match.group(1):
+        currency_text = "RMB"
+    return f"{amount_match.group(1)} {currency_text}"
+
+
 def extract_reward_amounts(text):
     """Prefer amounts on reward lines over prices mentioned elsewhere nearby."""
+    structured = extract_structured_reward_amount(text)
+    if structured:
+        return [structured]
     lines = text.splitlines()
     selected = set()
     for index, line in enumerate(lines):
@@ -480,6 +511,98 @@ def extract_reward_amounts(text):
             selected.update(range(index, min(len(lines), index + 2)))
     focused = "\n".join(lines[index] for index in sorted(selected))
     return extract_amounts(focused) or extract_amounts(text)
+
+
+def has_task_contributor_reward_link(text, reward_label=False):
+    """Require evidence that the reward belongs to this contribution task."""
+    lower = text.lower()
+    if re.search(
+        r"\b(?:no|not offering|without)\s+(?:a\s+)?(?:cash\s+)?(?:bug\s+)?(?:bounty|reward|prize)\b"
+        r"|\b(?:can't|cannot|can not|unable to)\s+offer\s+(?:any\s+)?(?:cash\s+)?(?:bounty|reward|prize)\b"
+        r"|\b(?:this|the) (?:task|issue|contribution) (?:is )?(?:unpaid|not paid)\b"
+        r"|\bdo not (?:offer|pay)\b",
+        lower,
+    ):
+        return False
+
+    if reward_label and re.search(
+        r"\b(?:fix|implement|add|build|create|write|test|document|submit|contribute)\b"
+        r"|修复|实现|提交|贡献|测评|文档|测试",
+        lower,
+    ):
+        return True
+
+    game_context = re.search(
+        r"\b(?:game|gameplay|player|inventory|boss|shop|minecraft|server economy|in-game|gamestate)\b",
+        lower,
+    )
+    external_offer_marker = re.search(
+        r"\b(?:bounty|cash prize|cash reward|paid task|paid contribution|contributors?|submit|pull request)\b"
+        r"|提交|贡献者|悬赏|现金奖励",
+        lower,
+    )
+    if game_context and not external_offer_marker:
+        return False
+
+    explicit_offer = re.search(
+        r"(?:^|\n)\s*(?:[^\w\n]{0,4}\s*)?(?:bounty|cash prize|cash reward)"
+        r"\s*(?::|[-–—]|\n)"
+        r"|(?:^|\n)\s*\[(?:bounty|reward)\]"
+        r"|\b(?:cash prize|cash reward|monetary reward|paid task|paid challenge|paid contribution|paid pr|paid issue)\b"
+        r"|\b(?:we|maintainers?|organizers?)\s+(?:will\s+)?(?:pay|award|reward|offer)\b"
+        r"|\b(?:offering|will pay)\b.{0,100}(?:\d|bounty|reward|prize)"
+        r"|(?:奖励形式|奖励金额|报酬|悬赏)\s*[:：]",
+        lower,
+        re.DOTALL,
+    )
+    if explicit_offer:
+        return True
+
+    reward_heading = r"(?:^|\n)\s*(?:[^\w\n]{0,4}\s*)?reward\s*(?::|[-–—]|\n)"
+    coding_action = r"\b(?:fix|implement|add|create|write|test|document)\b|修复|实现|编写|测试|文档"
+    if re.search(reward_heading + r".{0,300}" + coding_action, lower, re.DOTALL) or re.search(
+        coding_action + r".{0,300}" + reward_heading,
+        lower,
+        re.DOTALL,
+    ):
+        return True
+
+    contribution = (
+        r"(?:submit(?:ter|ting|ted|s)?|submission|pull request|\bpr\b|contributors?|participants?|entrants?"
+        r"|accepted reports?|merge[sd]?|contribut(?:e|ion|ors?)|提交|贡献|合并|作者|参与者)"
+    )
+    reward = r"(?:claim|earn|receive|get paid|be paid|award(?:ed)?|reward(?:ed)?|bounty|prize|payment|奖励|发放)"
+    return bool(
+        re.search(contribution + r".{0,240}" + reward, lower, re.DOTALL)
+        or re.search(reward + r".{0,240}" + contribution, lower, re.DOTALL)
+    )
+
+
+def non_cash_reward_types(text):
+    """Return explicitly offered non-cash reward forms, excluding incidental mentions."""
+    found = []
+    for name, pattern in NON_CASH_REWARD_PATTERNS:
+        linked = (
+            rf"(?:reward|prize|award|payment|payout|奖励|奖品|报酬|酬谢|发放)[^.;\n]{{0,100}}(?:{pattern})"
+            rf"|(?:{pattern})[^.;\n]{{0,100}}(?:reward|prize|award|payment|payout|奖励|奖品|报酬|酬谢|发放)"
+        )
+        if re.search(linked, text, re.IGNORECASE):
+            found.append(name)
+    return found
+
+
+def is_non_cash_only_reward(text):
+    if not non_cash_reward_types(text):
+        return False
+    if set(extract_payment_methods(text)) & FIAT_PAYMENT_METHODS:
+        return False
+    cash_alternative = re.search(
+        r"\b(?:cash prize|cash reward|cash payment|paid via (?:paypal|wise|stripe)|bank transfer|wire transfer)\b"
+        r"|现金(?:奖励|奖品|支付|发放)|银行转账|支付宝|微信支付",
+        text,
+        re.IGNORECASE,
+    )
+    return not bool(cash_alternative)
 
 
 def has_document_reward_assertion(context):
@@ -843,6 +966,7 @@ def analyze_candidate(
     updated_at=None,
     now=None,
     platform_payment_rule=None,
+    reward_offer_confirmed=False,
 ):
     """Normalize and score an Issue or Markdown document candidate."""
     context = relevant_context(text)
@@ -862,8 +986,12 @@ def analyze_candidate(
         return None
     if source == "Repository Markdown" and re.search(r"\b(?:2|3|4|5|6|7|8|9|1\d)\s*[- ]?months?\b", lower):
         return None
+    if not reward_offer_confirmed and not has_task_contributor_reward_link(text):
+        return None
+    if is_non_cash_only_reward(text):
+        return None
 
-    amounts = extract_reward_amounts(context)
+    amounts = extract_reward_amounts(text)
     methods = merge_payment_methods(extract_payment_methods(text), platform_payment_rule)
     if is_crypto_only_payment(methods, text):
         return None
@@ -978,7 +1106,10 @@ def has_issue_reward_offer(item):
         return False
 
     labels = [str(label.get("name") or "").lower() for label in item.get("labels", []) if isinstance(label, dict)]
-    if any("bounty" in label or "reward" in label for label in labels):
+    reward_label = any("bounty" in label or "reward" in label for label in labels)
+    if not has_task_contributor_reward_link(combined, reward_label=reward_label):
+        return False
+    if reward_label:
         return True
 
     explicit_title = re.search(
@@ -1390,6 +1521,7 @@ def scan_issues(token=None, host_repo=None):
                 comments=item.get("comments"),
                 updated_at=item.get("updated_at"),
                 platform_payment_rule=platform_rule,
+                reward_offer_confirmed=True,
             )
             if candidate:
                 pr_info = fetch_related_pr_info(item, token)
