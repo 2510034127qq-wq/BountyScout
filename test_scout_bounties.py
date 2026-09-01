@@ -1,3 +1,4 @@
+import io
 import json
 import tempfile
 import unittest
@@ -9,6 +10,17 @@ import scout_bounties as scout
 
 
 NOW = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+
+def api_error(code, message, headers=None):
+    body = io.BytesIO(json.dumps({"message": message}).encode("utf-8"))
+    return scout.urllib.error.HTTPError("https://api.github.com/test", code, message, headers or {}, body)
+
+
+def api_response(payload):
+    response = mock.MagicMock()
+    response.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
+    return response
 
 
 class CandidateAnalysisTests(unittest.TestCase):
@@ -342,17 +354,69 @@ class TriageAndStateTests(unittest.TestCase):
     def test_issue_search_depth_is_expanded(self):
         self.assertEqual(scout.ISSUE_RESULTS_PER_QUERY, 50)
 
-    def test_search_endpoint_retries_once_after_failure(self):
-        with mock.patch.object(
-            scout,
-            "github_api_get",
-            side_effect=[None, {"items": []}],
-        ) as api_get, mock.patch.object(scout.time, "sleep") as sleep:
-            result = scout.search_endpoint("code", "reward", "token", retry_delay=60)
+    def test_rate_limit_prefers_retry_after_header(self):
+        responses = [
+            api_error(
+                429,
+                "secondary rate limit",
+                {
+                    "Retry-After": "107",
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": "9999999999",
+                },
+            ),
+            api_response({"items": []}),
+        ]
+        with mock.patch.object(scout.urllib.request, "urlopen", side_effect=responses) as urlopen, mock.patch.object(
+            scout.time, "sleep"
+        ) as sleep:
+            result = scout.github_api_get("/search/code?q=reward")
 
         self.assertEqual(result, {"items": []})
-        self.assertEqual(api_get.call_count, 2)
-        sleep.assert_called_once_with(60)
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(107)
+
+    def test_rate_limit_uses_reset_epoch_when_remaining_is_zero(self):
+        responses = [
+            api_error(
+                403,
+                "API rate limit exceeded",
+                {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1062"},
+            ),
+            api_response({"ok": True}),
+        ]
+        with mock.patch.object(scout.urllib.request, "urlopen", side_effect=responses), mock.patch.object(
+            scout.time, "time", return_value=1000
+        ), mock.patch.object(scout.time, "sleep") as sleep:
+            result = scout.github_api_get("/rate-limited")
+
+        self.assertEqual(result, {"ok": True})
+        sleep.assert_called_once_with(62)
+
+    def test_secondary_rate_limit_uses_three_exponential_retries(self):
+        responses = [
+            api_error(429, "You have exceeded a secondary rate limit") for _ in range(3)
+        ] + [api_response({"ok": True})]
+        with mock.patch.object(scout.urllib.request, "urlopen", side_effect=responses) as urlopen, mock.patch.object(
+            scout.time, "sleep"
+        ) as sleep:
+            result = scout.github_api_get("/secondary-limit")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(urlopen.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [60, 120, 240])
+
+    def test_non_rate_limit_403_is_not_retried(self):
+        with mock.patch.object(
+            scout.urllib.request,
+            "urlopen",
+            side_effect=api_error(403, "Resource not accessible by integration"),
+        ) as urlopen, mock.patch.object(scout.time, "sleep") as sleep:
+            result = scout.github_api_get("/forbidden")
+
+        self.assertIsNone(result)
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
 
     def test_code_search_queries_are_spaced(self):
         queries = [("first", "first query"), ("second", "second query")]
@@ -365,7 +429,6 @@ class TriageAndStateTests(unittest.TestCase):
         self.assertTrue(worked)
         sleep.assert_called_once_with(scout.CODE_SEARCH_INTERVAL_SECONDS)
         self.assertEqual(search.call_count, 2)
-        self.assertTrue(all(call.kwargs["retry_delay"] == scout.CODE_SEARCH_RETRY_SECONDS for call in search.call_args_list))
 
     def test_scan_statistics_are_logged(self):
         with mock.patch.object(scout, "search_endpoint", return_value={"items": []}), mock.patch.object(

@@ -75,7 +75,7 @@ python3 -m unittest -v
 
 ## GitHub Actions
 
-工作流 `.github/workflows/bounty-scout.yml` 每小时运行，也可在 Actions 页面手动触发。默认的 `GITHUB_TOKEN` 用于搜索、创建本仓库的通知 Issue 和提交状态文件，无需单独创建。
+工作流 `.github/workflows/bounty-scout.yml` 每小时运行，也可在 Actions 页面手动触发。默认的 `GITHUB_TOKEN` 用于搜索、创建本仓库的通知 Issue 和提交状态文件，无需单独创建。Code Search 查询之间固定间隔 7 秒；遇到 GitHub 403/429 限流时，优先按 `Retry-After` 等待，其次等待到 `X-RateLimit-Reset`，两者均缺失时按 60、120、240 秒指数退避，最多重试 3 次。
 
 仓库结构：
 

@@ -11,6 +11,7 @@ import base64
 import html
 import ipaddress
 import json
+import math
 import os
 import re
 import sys
@@ -31,7 +32,8 @@ MAX_DOCUMENTS_TO_FETCH = 60
 MAX_FALLBACK_REPOSITORIES = 12
 DOCUMENT_RESULTS_PER_QUERY = 6
 CODE_SEARCH_INTERVAL_SECONDS = 7
-CODE_SEARCH_RETRY_SECONDS = 60
+MAX_RATE_LIMIT_RETRIES = 3
+RATE_LIMIT_FALLBACK_SECONDS = 60
 
 # Keep the legacy Issue scan, but broaden the vocabulary beyond "bounty".
 ISSUE_SEARCH_QUERIES = [
@@ -291,8 +293,49 @@ def save_seen_bounties(seen_urls, state_file=STATE_FILE):
         log(f"Error saving state file: {exc}")
 
 
-def github_api_get(url, token=None, accept="application/vnd.github+json"):
-    """Return decoded JSON, or None after logging a concise API error."""
+def response_header(headers, name):
+    if not headers:
+        return ""
+    value = headers.get(name)
+    if value is None:
+        value = headers.get(name.lower())
+    return str(value or "").strip()
+
+
+def rate_limit_wait_seconds(error, message, retry_index):
+    """Return GitHub's required wait and its source, or None for non-rate errors."""
+    if error.code not in (403, 429):
+        return None
+    headers = error.headers or {}
+    retry_after = response_header(headers, "Retry-After")
+    if retry_after:
+        try:
+            return max(1, math.ceil(float(retry_after))), "Retry-After"
+        except ValueError:
+            pass
+
+    remaining = response_header(headers, "X-RateLimit-Remaining")
+    reset = response_header(headers, "X-RateLimit-Reset")
+    if remaining == "0" and reset:
+        try:
+            return max(1, math.ceil(float(reset) - time.time())), "X-RateLimit-Reset"
+        except ValueError:
+            pass
+
+    lower_message = message.lower()
+    rate_limited = error.code == 429 or "rate limit" in lower_message or "abuse" in lower_message
+    if not rate_limited:
+        return None
+    return RATE_LIMIT_FALLBACK_SECONDS * (2**retry_index), "exponential backoff"
+
+
+def github_api_get(
+    url,
+    token=None,
+    accept="application/vnd.github+json",
+    max_rate_limit_retries=MAX_RATE_LIMIT_RETRIES,
+):
+    """Return decoded JSON, retrying bounded GitHub rate-limit responses."""
     if url.startswith("/"):
         url = API_ROOT + url
     headers = {
@@ -302,33 +345,39 @@ def github_api_get(url, token=None, accept="application/vnd.github+json"):
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=25) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = ""
+    for retry_index in range(max_rate_limit_retries + 1):
+        request = urllib.request.Request(url, headers=headers)
         try:
-            payload = json.loads(exc.read().decode("utf-8"))
-            detail = f": {payload.get('message', '')}"
-        except (ValueError, UnicodeDecodeError):
-            pass
-        log(f"GitHub API {exc.code} for {url}{detail}")
-    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-        log(f"GitHub API error for {url}: {exc}")
+            with urllib.request.urlopen(request, timeout=25) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            message = ""
+            try:
+                payload = json.loads(exc.read().decode("utf-8"))
+                message = str(payload.get("message") or "")
+            except (ValueError, UnicodeDecodeError):
+                pass
+            detail = f": {message}" if message else ""
+            log(f"GitHub API {exc.code} for {url}{detail}")
+            retry = rate_limit_wait_seconds(exc, message, retry_index)
+            if retry is None or retry_index >= max_rate_limit_retries:
+                return None
+            delay, source = retry
+            log(
+                f"GitHub rate limit: waiting {delay}s from {source} "
+                f"before retry {retry_index + 1}/{max_rate_limit_retries}."
+            )
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            log(f"GitHub API error for {url}: {exc}")
+            return None
     return None
 
 
-def search_endpoint(endpoint, query, token=None, per_page=SEARCH_RESULTS_PER_QUERY, retry_delay=0):
+def search_endpoint(endpoint, query, token=None, per_page=SEARCH_RESULTS_PER_QUERY):
     params = urllib.parse.urlencode({"q": query, "per_page": per_page})
     accept = "application/vnd.github.text-match+json, application/vnd.github+json"
-    url = f"/search/{endpoint}?{params}"
-    result = github_api_get(url, token, accept=accept)
-    if result is None and retry_delay > 0:
-        log(f"{endpoint.title()} search failed; retrying once in {retry_delay}s.")
-        time.sleep(retry_delay)
-        result = github_api_get(url, token, accept=accept)
-    return result
+    return github_api_get(f"/search/{endpoint}?{params}", token, accept=accept)
 
 
 def fetch_text_url(url, token=None):
@@ -1214,7 +1263,6 @@ def fetch_code_search_documents(token):
             query,
             token,
             per_page=DOCUMENT_RESULTS_PER_QUERY,
-            retry_delay=CODE_SEARCH_RETRY_SECONDS,
         )
         if results is None:
             continue
