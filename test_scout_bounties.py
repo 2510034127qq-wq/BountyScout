@@ -614,6 +614,23 @@ class TriageAndStateTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 2)
         sleep.assert_called_once_with(107)
 
+    def test_github_api_encodes_spaces_in_code_search_result_url(self):
+        raw_url = (
+            "https://api.github.com/repositories/263787924/contents/"
+            "_cet/Higher Diploma in Social Service.md?ref=665209831ac70cada6d52510414e444ce163e5e5"
+        )
+        with mock.patch.object(
+            scout.urllib.request,
+            "urlopen",
+            return_value=api_response({"content": ""}),
+        ) as urlopen:
+            result = scout.github_api_get(raw_url, "token")
+
+        self.assertEqual(result, {"content": ""})
+        request = urlopen.call_args.args[0]
+        self.assertIn("Higher%20Diploma%20in%20Social%20Service.md", request.full_url)
+        self.assertNotIn(" ", request.full_url)
+
     def test_rate_limit_uses_reset_epoch_when_remaining_is_zero(self):
         responses = [
             api_error(

@@ -368,6 +368,14 @@ def rate_limit_wait_seconds(error, message, retry_index):
     return RATE_LIMIT_FALLBACK_SECONDS * (2**retry_index), "exponential backoff"
 
 
+def normalized_request_url(url):
+    """Percent-encode raw path/query characters returned by GitHub search."""
+    parts = urllib.parse.urlsplit(url)
+    path = urllib.parse.quote(parts.path, safe="/%:@-._~!$&'()*+,;=")
+    query = urllib.parse.quote(parts.query, safe="=&%:@/?+-._~!$'()*;,")
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment))
+
+
 def github_api_get(
     url,
     token=None,
@@ -377,6 +385,7 @@ def github_api_get(
     """Return decoded JSON, retrying bounded GitHub rate-limit responses."""
     if url.startswith("/"):
         url = API_ROOT + url
+    url = normalized_request_url(url)
     headers = {
         "Accept": accept,
         "User-Agent": "BountyScout-MicroChallengeScanner",
