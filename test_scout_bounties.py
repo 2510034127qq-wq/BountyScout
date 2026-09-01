@@ -321,6 +321,11 @@ class TriageAndStateTests(unittest.TestCase):
         }
         self.assertFalse(scout.is_clean_issue(exclusive))
         self.assertEqual(scout.issue_safeguard_reason(exclusive), "assigned / claimed")
+        no_new_claims = {
+            **base,
+            "body": "A submission is already under review. New contributors should not start parallel work.",
+        }
+        self.assertFalse(scout.is_clean_issue(no_new_claims))
         self.assertFalse(scout.is_clean_issue({**base, "labels": [{"name": "completed"}]}))
         self.assertFalse(scout.is_clean_issue({**base, "body": "This task has been completed."}))
 
@@ -625,6 +630,55 @@ class TriageAndStateTests(unittest.TestCase):
         )
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate["reward"], "金额待确认")
+
+    def test_domain_payment_words_near_code_work_do_not_prove_a_bounty(self):
+        cases = (
+            "Enable product charges and payouts, then audit the $5/$10/$20 monthly prices.",
+            "A VAT payment contributes the amount to paid totals. Fix the accounting code and submit a PR.",
+            "Never approve payments or start paid services. Run tests before opening a pull request.",
+            "The licence covers commercial advantage or monetary compensation. Post a pull request with feedback.",
+            "Evaluate an external creator platform's payout semantics and reuse its reward normalizer.",
+            "The demo paid tool settles a simulated payment before input validation. Fix the test.",
+            "Add historical personnel compensation records and employer-paid benefit fields.",
+            "Build virtual races where users earn prizes; cash fulfillment may be added later.",
+        )
+        for index, text in enumerate(cases):
+            with self.subTest(index=index):
+                item = {"title": "Ordinary engineering issue", "body": text, "labels": []}
+                self.assertFalse(scout.has_issue_reward_offer(item))
+                self.assertIsNone(
+                    scout.analyze_candidate(
+                        item["title"],
+                        "example/product",
+                        f"https://github.com/example/product/issues/{70 + index}",
+                        "GitHub Issue",
+                        text,
+                        now=NOW,
+                    )
+                )
+
+        genuine = "Paid task: fix one parser edge case and submit a PR to claim the $60 bounty."
+        self.assertTrue(scout.has_issue_reward_offer({"title": "Parser fix", "body": genuine, "labels": []}))
+
+    def test_archived_competition_directory_is_discovery_not_current_task(self):
+        text = """
+        # Programming Competitions
+        | Competition | Organizer | Prize | Link |
+        | Code Jam | Google | USD 100,000 | [archive](https://example.com/codejam/archive) |
+        | Hash Code | Google | Cash prize | [archive](https://example.com/hashcode/archive) |
+        | Kick Start | Google | Prize | [archive](https://example.com/kickstart/archive) |
+        """
+        self.assertTrue(scout.is_discovery_source_document(text))
+        self.assertIsNone(
+            scout.analyze_candidate(
+                "example/repo — docs/companies/competitions.md",
+                "example/repo",
+                "https://github.com/example/repo/blob/main/docs/companies/competitions.md",
+                "Repository Markdown",
+                text,
+                now=NOW,
+            )
+        )
 
     def test_generic_backing_templates_need_current_funding_evidence(self):
         templates = (

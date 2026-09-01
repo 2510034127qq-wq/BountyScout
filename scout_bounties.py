@@ -235,6 +235,9 @@ PRODUCT_BILLING_TERMS = (
     "application fee",
     "card charge",
     "charged a real card",
+    "monthly prices",
+    "customer portal",
+    "revenuecat",
     "subscription price",
     "subscription tier",
     "credit pack",
@@ -586,6 +589,9 @@ def has_explicit_no_current_reward(text):
         re.search(
             r"\bproduction payouts? (?:are |is )?not live yet\b"
             r"|\bpayment capture remains disabled\b|\bpayouts? (?:are |is )?disabled\b"
+            r"|\b(?:this|it) does(?: not|n't) promise an award\b"
+            r"|\b(?:must not|cannot|can't) (?:choose or imply|authori[sz]e) payment\b"
+            r"|\bcannot become paid\b"
             r"|\b(?:this (?:issue|task) )?does(?: not|n't) have any rewards? yet\b"
             r"|\b(?:no|without) (?:current )?(?:monetary )?(?:bounty|rewards?) yet\b"
             r"|\bno reward (?:has been )?added yet\b"
@@ -668,13 +674,18 @@ def has_direct_contributor_offer_evidence(text):
 
 def has_direct_bounty_offer_evidence(text):
     """Return true for a current/direct task offer rather than monetary context."""
+    action = r"(?:fix|implement|build|create|write|test|document|submit|complete|pull request|contribution)"
+    reward = r"(?:bounty|cash reward|cash prize|payout|compensation)"
     return bool(
         has_current_reward_evidence(text)
         or has_direct_contributor_offer_evidence(text)
         or re.search(
-            r"(?:^|\n)\s*(?:#{1,6}\s*)?(?:\[[^]]+\]\s*)?(?:bounty|cash prize|cash reward)\s*[:–—-]"
+            r"(?:^|\n)\s*\[bounty\]\s+\S"
+            r"|(?:^|\n)\s*(?:#{1,6}\s*)?(?:\[[^]]+\]\s*)?(?:bounty|cash prize|cash reward)\s*[:–—-]"
             r"|\bpaid\b.{0,50}\bbounty\b"
-            r"|\b(?:claim|earn)\b.{0,80}\b(?:the\s+)?bounty\b",
+            r"|\b(?:claim|earn)\b.{0,80}\b(?:the\s+)?bounty\b"
+            r"|\b" + action + r"\b.{0,120}\b(?:to claim|for)\s+(?:a |the )?" + reward + r"\b"
+            r"|\b" + reward + r"\b.{0,120}\b(?:for|to)\s+(?:the\s+)?" + action + r"\b",
             text,
             re.IGNORECASE | re.DOTALL,
         )
@@ -750,7 +761,13 @@ def is_discovery_source_document(text):
             "browse github issues",
         )
     )
-    return bool(general_range or marketplace or program_signals >= 2)
+    table_rows = len(re.findall(r"^\s*\|[^\n]+\|\s*$", text, re.MULTILINE))
+    competition_directory = bool(
+        table_rows >= 4
+        and re.search(r"\b(?:competition|contest|challenge)s?\b", lower)
+        and re.search(r"(?:/archive\b|\barchived?\b|\bpast competitions?\b)", lower)
+    )
+    return bool(general_range or marketplace or program_signals >= 2 or competition_directory)
 
 
 def has_task_contributor_reward_link(text, reward_label=False):
@@ -794,9 +811,12 @@ def has_task_contributor_reward_link(text, reward_label=False):
         r"(?:^|\n)\s*(?:[^\w\n]{0,4}\s*)?(?:bounty|cash prize|cash reward)"
         r"\s*(?::|[-–—]|\n)"
         r"|(?:^|\n)\s*\[(?:bounty|reward)\]"
-        r"|\b(?:cash prize|cash reward|monetary reward|paid task|paid challenge|paid contribution|paid pr|paid issue)\b"
-        r"|\b(?:we|maintainers?|organizers?)\s+(?:will\s+)?(?:pay|award|reward|offer)\b"
-        r"|\b(?:offering|will pay)\b.{0,100}(?:\d|bounty|reward|prize)"
+        r"|\b(?:cash prize|cash reward|monetary reward|paid task|paid challenge|paid pr|paid issue)\b"
+        r"|\b(?:we|maintainers?|organizers?)\s+(?:will\s+)?(?:pay|award|reward)\b"
+        r"|\b(?:we|maintainers?|organizers?)\s+(?:will\s+)?offer\b.{0,100}"
+        r"\b(?:bounty|cash reward|cash prize|compensation)\b"
+        r"|(?:\bwill pay\b|\b(?:we|maintainers?|organizers?)\s+(?:are\s+)?offering\b)"
+        r".{0,100}(?:\d|bounty|reward|prize)"
         r"|(?:奖励形式|奖励金额|报酬|悬赏)\s*[:：]",
         lower,
         re.DOTALL,
@@ -824,19 +844,7 @@ def has_task_contributor_reward_link(text, reward_label=False):
     ):
         return True
 
-    contribution = (
-        r"(?:submit(?:ter|ting|ted|s)?|submission|pull request|\bpr\b|contributors?|participants?|entrants?"
-        r"|accepted reports?|merge[sd]?|contribut(?:e|ion|ors?)|提交|贡献|合并|作者|参与者)"
-    )
-    reward = (
-        r"(?:claim|earn|get paid|be paid|award(?:ed)?|reward(?:ed)?|bounty|prize|payout"
-        r"|compensation|奖励|发放)"
-    )
-    return bool(
-        re.search(contribution + r".{0,240}" + reward, lower, re.DOTALL)
-        or re.search(reward + r".{0,240}" + contribution, lower, re.DOTALL)
-        or has_direct_contributor_offer_evidence(text)
-    )
+    return has_direct_bounty_offer_evidence(text)
 
 
 def non_cash_reward_types(text):
@@ -1372,6 +1380,8 @@ def exclusive_claim_rule(text):
             r"\b(?:cannot|can't|may not|must not|not eligible)\b"
             r"|\b(?:do not|don't) (?:start|work|submit|open (?:a )?(?:pr|pull request))\b.{0,80}"
             r"\b(?:already assigned|already claimed|unless (?:you are )?assigned)\b"
+            r"|\bnew contributors? should not start(?: parallel)? work\b"
+            r"|\bno new claims\b"
             r"|\bno longer available once claimed\b"
             r"|仅限(?:被)?(?:分配|认领)(?:的)?(?:贡献者|人员|用户)|已认领后.{0,40}(?:其他人|他人).{0,30}(?:不能|不可)",
             text,
@@ -1414,9 +1424,8 @@ def issue_safeguard_reason(item, host_repo=None):
         return "heavy scope"
     if issue_is_explicitly_completed(item):
         return "completed"
-    participating = bool(item.get("assignees") or labels & {"claimed", "in progress", "assigned"})
     text = "\n".join((str(item.get("title") or ""), str(item.get("body") or "")))
-    if participating and exclusive_claim_rule(text):
+    if exclusive_claim_rule(text):
         return "assigned / claimed"
     repository_url = str(item.get("repository_url", ""))
     if host_repo and repository_url.rstrip("/").endswith("/repos/" + host_repo):
