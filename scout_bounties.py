@@ -477,13 +477,127 @@ def search_endpoint(endpoint, query, token=None, per_page=SEARCH_RESULTS_PER_QUE
     return github_api_get(f"/search/{endpoint}?{params}", token, accept=accept)
 
 
-def fetch_text_url(url, token=None):
+BLOCKED_HTTP_HOSTNAMES = frozenset(
+    {
+        "localhost",
+        "metadata.google.internal",
+        "metadata.internal",
+        "kubernetes.default.svc",
+    }
+)
+BLOCKED_HTTP_HOST_SUFFIXES = (".local", ".internal")
+GITHUB_REDIRECT_HOST_SUFFIXES = (
+    ".github.com",
+    ".githubusercontent.com",
+    ".github.io",
+)
+
+
+def _parse_ip_literal(hostname):
+    """Parse decimal/hex/octal and shortened dotted IP encodings used in SSRF bypasses."""
+    if not hostname:
+        return None
+    candidate = hostname.strip().lower()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    try:
+        return ipaddress.ip_address(candidate)
+    except ValueError:
+        pass
+
+    if re.fullmatch(r"\d{1,10}", candidate):
+        value = int(candidate)
+        if 0 <= value <= 0xFFFFFFFF:
+            try:
+                return ipaddress.ip_address(value)
+            except ValueError:
+                return None
+
+    if re.fullmatch(r"0x[0-9a-f]{1,8}", candidate):
+        value = int(candidate, 16)
+        if value <= 0xFFFFFFFF:
+            try:
+                return ipaddress.ip_address(value)
+            except ValueError:
+                return None
+
+    if "." not in candidate:
+        return None
+
+    parts = candidate.split(".")
+    if not 1 <= len(parts) <= 4:
+        return None
+    numbers = []
+    for part in parts:
+        if not part:
+            return None
+        if re.fullmatch(r"0x[0-9a-f]+", part):
+            numbers.append(int(part, 16))
+        elif len(part) > 1 and part.startswith("0") and part[1:].isdigit():
+            numbers.append(int(part, 8))
+        elif re.fullmatch(r"\d+", part):
+            numbers.append(int(part))
+        else:
+            return None
+    while len(numbers) < 4:
+        numbers.append(0)
+    if len(numbers) != 4 or any(number < 0 or number > 255 for number in numbers):
+        return None
+    packed = (numbers[0] << 24) | (numbers[1] << 16) | (numbers[2] << 8) | numbers[3]
+    try:
+        return ipaddress.ip_address(packed)
+    except ValueError:
+        return None
+
+
+def _is_blocked_http_host(hostname):
+    lowered = (hostname or "").strip().lower()
+    if not lowered:
+        return True
+    if lowered in BLOCKED_HTTP_HOSTNAMES or lowered.endswith(BLOCKED_HTTP_HOST_SUFFIXES):
+        return True
+    address = _parse_ip_literal(lowered)
+    if address is not None:
+        return (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+        )
+    return False
+
+
+def _is_github_redirect_host(hostname):
+    lowered = (hostname or "").strip().lower()
+    return lowered == "github.com" or lowered.endswith(GITHUB_REDIRECT_HOST_SUFFIXES)
+
+
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject redirects to private/internal targets when fetching untrusted URLs."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _is_github_redirect_host(urllib.parse.urlparse(req.full_url).hostname):
+            if _is_github_redirect_host(urllib.parse.urlparse(newurl).hostname):
+                return urllib.request.HTTPRedirectHandler.redirect_request(
+                    self, req, fp, code, msg, headers, newurl
+                )
+        if not safe_public_http_url(newurl):
+            return None
+        return urllib.request.HTTPRedirectHandler.redirect_request(self, req, fp, code, msg, headers, newurl)
+
+
+def fetch_text_url(url, token=None, restrict_redirects=False):
     headers = {"User-Agent": "BountyScout-MicroChallengeScanner"}
     if token and url.startswith(API_ROOT):
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
+    opener = (
+        urllib.request.build_opener(SafeRedirectHandler())
+        if restrict_redirects
+        else urllib.request.build_opener()
+    )
     try:
-        with urllib.request.urlopen(request, timeout=25) as response:
+        with opener.open(request, timeout=25) as response:
             return response.read(1_000_000).decode("utf-8", errors="replace")
     except (urllib.error.URLError, TimeoutError) as exc:
         log(f"Unable to fetch document {url}: {exc}")
@@ -1661,15 +1775,9 @@ def safe_public_http_url(url):
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         return False
     hostname = parsed.hostname.lower()
-    if hostname in {"localhost", "docs.google.com", "forms.gle"} or hostname.endswith(".local"):
+    if hostname in {"docs.google.com", "forms.gle"}:
         return False
-    try:
-        address = ipaddress.ip_address(hostname)
-        if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
-            return False
-    except ValueError:
-        pass
-    return True
+    return not _is_blocked_http_host(hostname)
 
 
 def html_to_plain_text(content):
@@ -1693,7 +1801,7 @@ def html_to_plain_text(content):
 def fetch_external_page_source(url):
     if not safe_public_http_url(url):
         return None
-    content = fetch_text_url(url)
+    content = fetch_text_url(url, restrict_redirects=True)
     if not content:
         return None
     title_match = re.search(r"<title[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
