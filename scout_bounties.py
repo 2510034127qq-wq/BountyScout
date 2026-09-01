@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,10 +26,12 @@ API_ROOT = "https://api.github.com"
 MAX_COMMENTS = 25
 DEFAULT_MAX_RESULTS = 20
 SEARCH_RESULTS_PER_QUERY = 10
-ISSUE_RESULTS_PER_QUERY = 20
+ISSUE_RESULTS_PER_QUERY = 50
 MAX_DOCUMENTS_TO_FETCH = 60
 MAX_FALLBACK_REPOSITORIES = 12
 DOCUMENT_RESULTS_PER_QUERY = 6
+CODE_SEARCH_INTERVAL_SECONDS = 7
+CODE_SEARCH_RETRY_SECONDS = 60
 
 # Keep the legacy Issue scan, but broaden the vocabulary beyond "bounty".
 ISSUE_SEARCH_QUERIES = [
@@ -217,22 +220,28 @@ PAYMENT_METHOD_PATTERNS = (
     ("BTC", r"\bbtc\b|\bbitcoin\b"),
     ("sats", r"\bsats?\b|\bsatoshis?\b|\blightning(?: network)?\b"),
     ("XLM", r"\bxlm\b"),
+    (
+        "RTC",
+        r"\b\d+(?:\.\d+)?\s*rtc\b|\b(?:auto[- ]?pays?|payout|paid only in|payment in)\b.{0,40}\brtc\b"
+        r"|\brtc\b.{0,40}\b(?:token|wallet|address)\b",
+    ),
     ("ETH", r"\beth\b|\bether\b"),
     ("SOL", r"\bsol\b"),
+    ("链上钱包", r"\bon[- ]chain (?:wallet|address)\b|\bcrypto(?:currency)? wallet\b"),
     ("支付宝", r"\balipay\b|支付宝"),
     ("微信支付", r"\bwechat pay\b|微信支付"),
 )
 
 FIAT_PAYMENT_METHODS = {"PayPal", "Wise", "Stripe", "银行转账", "支付宝", "微信支付"}
-CRYPTO_PAYMENT_METHODS = {"USDC", "USDT", "DAI", "BTC", "sats", "XLM", "ETH", "SOL"}
+CRYPTO_PAYMENT_METHODS = {"USDC", "USDT", "DAI", "BTC", "sats", "XLM", "RTC", "ETH", "SOL", "链上钱包"}
 RADAR_LABEL_HINTS = {"radar", "aggregator", "external-mirror", "bounty-hunter", "mirror"}
 MAX_SOURCE_HOPS = 3
 
 AMOUNT_PATTERNS = (
-    r"(?:US\$|USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|ETH|SOL|USDT|DAI|BTC|€|£|¥|₹|\$)\s*"
-    r"\d[\d,]*(?:\.\d+)?(?:\s*(?:USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|ETH|SOL|USDT|DAI|BTC))?"
-    r"(?:\s*[-–—]\s*(?:(?:US\$|USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|ETH|SOL|USDT|DAI|BTC|€|£|¥|₹|\$)\s*)?\d[\d,]*(?:\.\d+)?)?",
-    r"\b\d[\d,]*(?:\.\d+)?\s*(?:USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|ETH|SOL|USDT|DAI|BTC)\b",
+    r"(?:US\$|USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC|€|£|¥|₹|\$)\s*"
+    r"\d[\d,]*(?:\.\d+)?(?:\s*(?:USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC))?"
+    r"(?:\s*[-–—]\s*(?:(?:US\$|USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC|€|£|¥|₹|\$)\s*)?\d[\d,]*(?:\.\d+)?)?",
+    r"\b\d[\d,]*(?:\.\d+)?\s*(?:USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC)\b",
 )
 
 
@@ -310,10 +319,16 @@ def github_api_get(url, token=None, accept="application/vnd.github+json"):
     return None
 
 
-def search_endpoint(endpoint, query, token=None, per_page=SEARCH_RESULTS_PER_QUERY):
+def search_endpoint(endpoint, query, token=None, per_page=SEARCH_RESULTS_PER_QUERY, retry_delay=0):
     params = urllib.parse.urlencode({"q": query, "per_page": per_page})
     accept = "application/vnd.github.text-match+json, application/vnd.github+json"
-    return github_api_get(f"/search/{endpoint}?{params}", token, accept=accept)
+    url = f"/search/{endpoint}?{params}"
+    result = github_api_get(url, token, accept=accept)
+    if result is None and retry_delay > 0:
+        log(f"{endpoint.title()} search failed; retrying once in {retry_delay}s.")
+        time.sleep(retry_delay)
+        result = github_api_get(url, token, accept=accept)
+    return result
 
 
 def fetch_text_url(url, token=None):
@@ -436,7 +451,7 @@ def has_document_reward_assertion(context):
     if paid_contributor and opportunity:
         return True
 
-    amount = r"(?:(?:US\$|USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|ETH|SOL|USDT|DAI|BTC|€|£|¥|₹|\$)\s*\d|\d[\d,]*\s*(?:USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|ETH|SOL|USDT|DAI|BTC))"
+    amount = r"(?:(?:US\$|USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC|€|£|¥|₹|\$)\s*\d|\d[\d,]*\s*(?:USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC))"
     reward = r"(?:bounty|reward|prize|payout|paid|winner)"
     return bool(
         re.search(reward + r".{0,160}" + amount, lower, re.DOTALL)
@@ -496,7 +511,8 @@ def payment_context(text):
         lower = line.lower()
         if any(term in lower for term in STRONG_REWARD_TERMS + GENERIC_REWARD_TERMS) or re.search(
             r"\bpay(?:ment|out|pal|ing|able|ed)?\b|winner|receive|bank transfer|wire transfer"
-            r"|usdc|usdt|tether|\bbtc\b|bitcoin|sats?|satoshi|lightning|\bxlm\b|\beth\b|\bsol\b|\bdai\b",
+            r"|usdc|usdt|tether|\bbtc\b|bitcoin|sats?|satoshi|lightning|\bxlm\b|\brtc\b|\beth\b|\bsol\b|\bdai\b"
+            r"|on[- ]chain|wallet address|crypto(?:currency)? wallet",
             lower,
         ):
             selected.append(line)
@@ -531,9 +547,19 @@ def payment_method_is_negated(clause, pattern):
     return bool(re.search(negative_pattern, clause, re.IGNORECASE))
 
 
-def is_crypto_only_payment(methods):
+def is_crypto_only_payment(methods, text=""):
     method_set = set(methods)
-    return bool(method_set & CRYPTO_PAYMENT_METHODS) and not bool(method_set & FIAT_PAYMENT_METHODS)
+    if method_set & FIAT_PAYMENT_METHODS:
+        return False
+    if method_set & CRYPTO_PAYMENT_METHODS:
+        return True
+    chain_payout = (
+        r"\b(?:auto[- ]?pays?|pay(?:ment|out|s|ing|ed)?|reward(?:ed)?|claim)\b"
+        r"[^.;\n]{0,120}\b(?:crypto(?:currency)?|tokens?|on[- ]chain|wallet(?: address)?)\b"
+        r"|\b(?:crypto(?:currency)?|tokens?|on[- ]chain|wallet(?: address)?)\b"
+        r"[^.;\n]{0,120}\b(?:auto[- ]?pays?|pay(?:ment|out|s|ing|ed)?|reward(?:ed)?|claim)\b"
+    )
+    return bool(re.search(chain_payout, text, re.IGNORECASE))
 
 
 def first_matching_line(text, patterns, max_length=280):
@@ -734,7 +760,7 @@ def analyze_candidate(title, project, url, source, text, comments=None, updated_
 
     amounts = extract_reward_amounts(context)
     methods = extract_payment_methods(text)
-    if is_crypto_only_payment(methods):
+    if is_crypto_only_payment(methods, text):
         return None
     strong_hit = any(term in lower for term in STRONG_REWARD_TERMS)
     generic_hit = any(term in lower for term in GENERIC_REWARD_TERMS)
@@ -856,8 +882,8 @@ def has_issue_reward_offer(item):
         return True
 
     amount = (
-        r"(?:(?:US\$|USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|ETH|SOL|USDT|DAI|BTC|€|£|¥|₹|\$)\s*\d"
-        r"|\d[\d,]*(?:\.\d+)?\s*(?:USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|ETH|SOL|USDT|DAI|BTC))"
+        r"(?:(?:US\$|USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC|€|£|¥|₹|\$)\s*\d"
+        r"|\d[\d,]*(?:\.\d+)?\s*(?:USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC))"
     )
     heading_offer = (
         r"(?:^|\n)\s*(?:#{1,6}\s*)?(?:[^\w\n]{0,3}\s*)?"
@@ -1066,23 +1092,40 @@ def scan_issues(token=None, host_repo=None):
     candidates = []
     seen_api_urls = set()
     seen_search_urls = set()
+    stats = {
+        "raw": 0,
+        "duplicates": 0,
+        "unresolved": 0,
+        "safeguards": 0,
+        "no_reward_offer": 0,
+        "analysis_filtered": 0,
+        "matched": 0,
+    }
     for query in ISSUE_SEARCH_QUERIES:
         log(f"Issue search: {query}")
         results = search_endpoint("issues", query, token, per_page=ISSUE_RESULTS_PER_QUERY)
         if not results:
             continue
-        for search_item in results.get("items", []):
+        items = results.get("items", [])
+        stats["raw"] += len(items)
+        for search_item in items:
             search_url = search_item.get("html_url")
-            if not search_url or search_url in seen_search_urls:
+            if not search_url:
+                stats["unresolved"] += 1
+                continue
+            if search_url in seen_search_urls:
+                stats["duplicates"] += 1
                 continue
             seen_search_urls.add(search_url)
             resolved = resolve_radar_source(search_item, token)
             if not resolved:
+                stats["unresolved"] += 1
                 continue
 
             if resolved["kind"] in ("document", "external"):
                 url = resolved["url"]
                 if url in seen_api_urls:
+                    stats["duplicates"] += 1
                     continue
                 seen_api_urls.add(url)
                 candidate = analyze_candidate(
@@ -1098,16 +1141,24 @@ def scan_issues(token=None, host_repo=None):
                         candidate["project_url"] = resolved["project_url"]
                     candidate["discovered_via"] = resolved.get("discovered_via")
                     candidates.append(candidate)
+                    stats["matched"] += 1
+                else:
+                    stats["analysis_filtered"] += 1
                 continue
 
             item = resolved["item"]
             url = item.get("html_url")
-            if (
-                not url
-                or url in seen_api_urls
-                or not is_clean_issue(item, host_repo)
-                or not has_issue_reward_offer(item)
-            ):
+            if not url:
+                stats["unresolved"] += 1
+                continue
+            if url in seen_api_urls:
+                stats["duplicates"] += 1
+                continue
+            if not is_clean_issue(item, host_repo):
+                stats["safeguards"] += 1
+                continue
+            if not has_issue_reward_offer(item):
+                stats["no_reward_offer"] += 1
                 continue
             seen_api_urls.add(url)
             text = "\n".join((str(item.get("title") or ""), str(item.get("body") or "")))
@@ -1127,6 +1178,16 @@ def scan_issues(token=None, host_repo=None):
                 if resolved.get("discovered_via"):
                     candidate["discovered_via"] = resolved["discovered_via"]
                 candidates.append(candidate)
+                stats["matched"] += 1
+            else:
+                stats["analysis_filtered"] += 1
+    log(
+        "Issue scan summary (Actions log only): "
+        f"raw={stats['raw']}, unique={len(seen_search_urls)}, duplicates={stats['duplicates']}, "
+        f"unresolved={stats['unresolved']}, safeguards={stats['safeguards']}, "
+        f"no_reward_offer={stats['no_reward_offer']}, analysis_filtered={stats['analysis_filtered']}, "
+        f"matched={stats['matched']}"
+    )
     return candidates
 
 
@@ -1144,9 +1205,17 @@ def fetch_code_search_documents(token):
     documents = []
     seen_urls = set()
     search_worked = False
-    for label, query in DOCUMENT_SEARCH_QUERIES:
+    for index, (label, query) in enumerate(DOCUMENT_SEARCH_QUERIES):
+        if index:
+            time.sleep(CODE_SEARCH_INTERVAL_SECONDS)
         log(f"Markdown code search: {label}")
-        results = search_endpoint("code", query, token, per_page=DOCUMENT_RESULTS_PER_QUERY)
+        results = search_endpoint(
+            "code",
+            query,
+            token,
+            per_page=DOCUMENT_RESULTS_PER_QUERY,
+            retry_delay=CODE_SEARCH_RETRY_SECONDS,
+        )
         if results is None:
             continue
         search_worked = True
@@ -1248,6 +1317,10 @@ def scan_documents(token=None):
         )
         if candidate:
             candidates.append(candidate)
+    log(
+        "Document scan summary (Actions log only): "
+        f"fetched={len(documents)}, analysis_filtered={len(documents) - len(candidates)}, matched={len(candidates)}"
+    )
     return candidates
 
 
@@ -1419,10 +1492,18 @@ def main(argv=None):
     if args.source in ("all", "docs"):
         candidates.extend(scan_documents(github_token))
 
+    discovered_count = len(candidates)
     ranked = deduplicate_and_rank(candidates)
+    deduplicated_count = len(ranked)
     if not args.include_seen:
         ranked = [candidate for candidate in ranked if candidate["url"] not in seen_urls]
+    unseen_count = len(ranked)
     selected = ranked[: args.max_results]
+    log(
+        "Final selection summary (Actions log only): "
+        f"discovered={discovered_count}, deduplicated={deduplicated_count}, "
+        f"unseen={unseen_count}, selected={len(selected)}"
+    )
 
     if args.json:
         print(json.dumps(selected, indent=2, ensure_ascii=False))

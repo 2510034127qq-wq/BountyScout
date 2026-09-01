@@ -233,7 +233,7 @@ class TriageAndStateTests(unittest.TestCase):
         self.assertFalse(scout.has_issue_reward_offer(submitted_claim))
 
     def test_rejects_crypto_only_payments(self):
-        assets = ("USDC", "USDT", "BTC", "sats", "Lightning", "ETH", "SOL", "XLM", "DAI")
+        assets = ("USDC", "USDT", "BTC", "sats", "Lightning", "ETH", "SOL", "XLM", "DAI", "RTC")
         for asset in assets:
             with self.subTest(asset=asset):
                 candidate = scout.analyze_candidate(
@@ -246,6 +246,29 @@ class TriageAndStateTests(unittest.TestCase):
                 )
                 self.assertIsNone(candidate)
 
+    def test_rejects_unknown_token_payout_to_on_chain_wallet(self):
+        candidate = scout.analyze_candidate(
+            "[BOUNTY] Small parser fix",
+            "example/parser",
+            "https://github.com/example/parser/issues/1",
+            "GitHub Issue",
+            "Bounty: $50. Fix one parser edge case. Payout is sent only to your on-chain wallet address.",
+            now=NOW,
+        )
+        self.assertIsNone(candidate)
+
+    def test_rtc_technical_term_does_not_imply_crypto_payment(self):
+        candidate = scout.analyze_candidate(
+            "[BOUNTY] Fix the RTC connection",
+            "example/realtime",
+            "https://github.com/example/realtime/issues/1",
+            "GitHub Issue",
+            "Bounty: $50. Fix the RTC connection bug and submit a pull request. Payment method is pending.",
+            now=NOW,
+        )
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["payment_method"], "待确认")
+
     def test_keeps_mixed_fiat_and_crypto_payment(self):
         candidate = scout.analyze_candidate(
             "[BOUNTY] Small parser fix",
@@ -257,6 +280,18 @@ class TriageAndStateTests(unittest.TestCase):
         )
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate["payment_method"], "PayPal、USDC")
+
+    def test_keeps_fiat_option_alongside_on_chain_wallet(self):
+        candidate = scout.analyze_candidate(
+            "[BOUNTY] Small parser fix",
+            "example/parser",
+            "https://github.com/example/parser/issues/1",
+            "GitHub Issue",
+            "Bounty: $50. Fix one parser edge case. Payout via PayPal or an on-chain wallet after merge.",
+            now=NOW,
+        )
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["payment_method"], "PayPal、链上钱包")
 
     def test_negated_fiat_option_does_not_bypass_crypto_filter(self):
         candidate = scout.analyze_candidate(
@@ -303,6 +338,45 @@ class TriageAndStateTests(unittest.TestCase):
             state.write_text(json.dumps(["https://b", "https://a"]), encoding="utf-8")
             scout.save_seen_bounties({"https://a", "https://b", "https://c"}, str(state))
             self.assertEqual(json.loads(state.read_text(encoding="utf-8")), ["https://b", "https://a", "https://c"])
+
+    def test_issue_search_depth_is_expanded(self):
+        self.assertEqual(scout.ISSUE_RESULTS_PER_QUERY, 50)
+
+    def test_search_endpoint_retries_once_after_failure(self):
+        with mock.patch.object(
+            scout,
+            "github_api_get",
+            side_effect=[None, {"items": []}],
+        ) as api_get, mock.patch.object(scout.time, "sleep") as sleep:
+            result = scout.search_endpoint("code", "reward", "token", retry_delay=60)
+
+        self.assertEqual(result, {"items": []})
+        self.assertEqual(api_get.call_count, 2)
+        sleep.assert_called_once_with(60)
+
+    def test_code_search_queries_are_spaced(self):
+        queries = [("first", "first query"), ("second", "second query")]
+        with mock.patch.object(scout, "DOCUMENT_SEARCH_QUERIES", queries), mock.patch.object(
+            scout, "search_endpoint", return_value={"items": []}
+        ) as search, mock.patch.object(scout.time, "sleep") as sleep:
+            documents, worked = scout.fetch_code_search_documents("token")
+
+        self.assertEqual(documents, [])
+        self.assertTrue(worked)
+        sleep.assert_called_once_with(scout.CODE_SEARCH_INTERVAL_SECONDS)
+        self.assertEqual(search.call_count, 2)
+        self.assertTrue(all(call.kwargs["retry_delay"] == scout.CODE_SEARCH_RETRY_SECONDS for call in search.call_args_list))
+
+    def test_scan_statistics_are_logged(self):
+        with mock.patch.object(scout, "search_endpoint", return_value={"items": []}), mock.patch.object(
+            scout, "log"
+        ) as logger:
+            self.assertEqual(scout.scan_issues("token"), [])
+
+        summary = logger.call_args_list[-1].args[0]
+        self.assertIn("Issue scan summary", summary)
+        self.assertIn("raw=0", summary)
+        self.assertIn("matched=0", summary)
 
     def test_deduplication_keeps_higher_score(self):
         low = {"url": "https://same", "score": 2, "updated_at": None}
@@ -451,6 +525,11 @@ class FormattingTests(unittest.TestCase):
         self.assertIn("Original comments: 3", message)
         self.assertIn("Discovered via:", message)
         self.assertIn("…and", message)
+
+        issue_body = scout.format_github_issue_body([candidate], "2026-09-01 00:00 UTC")
+        self.assertIn("Tiny parser fix", issue_body)
+        self.assertNotIn("Issue scan summary", issue_body)
+        self.assertNotIn("analysis_filtered=", issue_body)
 
 
 if __name__ == "__main__":
