@@ -1,4 +1,4 @@
-name: Scout Active Bounties Hourly
+name: Scout Micro Bounties Hourly
 
 on:
   schedule:
@@ -20,6 +20,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
+      - name: Run Offline Tests
+        run: python -m unittest -v
 
       - name: Run Bounty Scout
         env:

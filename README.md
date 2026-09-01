@@ -1,71 +1,102 @@
-# 🎯 Bounty Scout: Hourly Notification System
+# 🎯 BountyScout: Micro Bounty Scanner
 
-A lightweight, state-tracking GitHub bounty scanner that runs **hourly**, searches for new open bounties, filters out competitive/crypto spam, and alerts you instantly.
+BountyScout 是一个无第三方依赖的 GitHub 扫描器，用来发现几十分钟到一天左右可完成的付费技术小任务。它保留原有的 GitHub Issue bounty 搜索，同时扫描 README、CONTRIBUTING 和独立的 Challenge/Bounty Markdown 文档，降低只依赖 `bounty` 关键词造成的漏报。
 
-Since it tracks seen bounty URLs, **it will only notify you once per bounty** (no spam).
+扫描器每小时通过 GitHub Actions 运行，使用 `seen_bounties.json` 记录已经通知过的原始链接，并支持 GitHub Issue、Telegram 和 Discord 通知。
 
----
+## 发现范围
 
-## 🚀 How It Works
+### GitHub Issues
 
-1. **GitHub Action Scheduled Trigger:** Runs automatically at minute `0` of every hour.
-2. **Scouts GitHub:** Queries active bounty search keywords using the GitHub Search API.
-3. **Triages Candidates:** Skips pull requests, already-assigned issues, overcrowded threads (>25 comments), and crypto-related spam.
-4. **State Machine Comparison:** Composed against `seen_bounties.json` to extract strictly **new** opportunities.
-5. **Instant Notifications:** Dispatches updates through your preferred channel (GitHub Issues, Telegram, or Discord).
-6. **Persists State:** Saves the updated seen list back to the repository so you don't receive duplicate alerts on the next run.
+扫描开放 Issue 中的 `bounty`、`cash prize`、`paid challenge`、`paid contribution`、`paid PR` 和 `contributor reward` 等表达。原有规则仍然有效：跳过 PR、已有负责人、超过 25 条评论的拥挤任务、广告/博彩/内容写作等噪声。
 
----
+### 仓库 Markdown
 
-## 🛠️ Step-by-Step Setup
+有 `GITHUB_TOKEN` 时，使用 GitHub Code Search 查找全站 Markdown，包括：
 
-### 1. Repository File Structure
+- README 和 CONTRIBUTING；
+- `CHALLENGE.md`、`BOUNTY.md`、活动说明等独立文件；
+- 包含 `cash prize`、`prize pool`、`engineering challenge`、`micro bounty` 等表达的其他 Markdown。
+
+没有令牌时，脚本自动降级为 GitHub Repository Search：先查匹配的 README，再检查仓库中名称带 `challenge`、`bounty`、`reward`、`prize` 或 `contribut` 的少量 Markdown。这个模式能运行，但覆盖率低于认证后的 Code Search。
+
+## 筛选和结果字段
+
+候选优先按“明确奖励 + 小任务信号 + 编码任务信号 + 提交方式完整度”排序。大型 Hackathon、招聘/实习岗位、`bounty-large`、明确的长期/重型实现、过期活动、已暂停任务和常见垃圾内容会被排除；镜像 Issue 会尽量恢复并去重到原始 Issue。其余不确定候选会保留，避免隐藏悬赏被过度过滤。
+
+每条通知尽量给出：
+
+- 项目、来源类型和原始链接；
+- 奖励金额与币种；
+- 任务摘要、截止时间和提交方式；
+- 明确写出的付款方式或结算资产（PayPal、Wise、Stripe、银行转账、USDC、XLM、ETH、SOL、GrantFox 等）；
+- Coding Agent 适配度和预估工作量。
+
+付款方式未在原文明确出现时始终显示 `待确认`，不会据金额或项目所在地推测中国大陆用户能否收款。Agent 适配度和无明确耗时的工作量是关键词启发式结果，领取任务前仍需打开原始链接核对资格、有效期和付款条款。
+
+## 本地运行
+
+只需 Python 3.9+，不需要安装依赖。
+
+```bash
+# 完整扫描；正常模式会发送已配置的通知并更新状态
+GITHUB_TOKEN=your_token python3 scout_bounties.py
+
+# 推荐先只读试跑：显示已见结果，不发通知、不修改状态
+GITHUB_TOKEN=your_token python3 scout_bounties.py \
+  --dry-run --include-seen --max-results 10
+
+# 只检查仓库文档，并输出便于二次处理的 JSON
+GITHUB_TOKEN=your_token python3 scout_bounties.py \
+  --dry-run --include-seen --source docs --json --max-results 20
+
+# 只保留原来的 Issue 扫描
+python3 scout_bounties.py --dry-run --source issues
+
+# 运行离线测试
+python3 -m unittest -v
+```
+
+可选参数：
+
+- `--source all|issues|docs`：限制扫描来源，默认 `all`；
+- `--dry-run`：不通知、不写入 `seen_bounties.json`；
+- `--include-seen`：试跑时也展示已经记录过的链接；
+- `--json`：输出结构化候选；
+- `--max-results N`：本轮最多通知多少条，默认 20；也可通过 `BOUNTYSCOUT_MAX_RESULTS` 设置。
+
+## GitHub Actions
+
+工作流 `.github/workflows/bounty-scout.yml` 每小时运行，也可在 Actions 页面手动触发。默认的 `GITHUB_TOKEN` 用于搜索、创建本仓库的通知 Issue 和提交状态文件，无需单独创建。
+
+仓库结构：
+
 ```text
 BountyScout/
-├── .github/
-│   └── workflows/
-│       └── bounty-scout.yml      # GitHub Actions workflow (hourly schedule)
-├── scout_bounties.py              # Core scout + notification script
-├── seen_bounties.json             # Auto-created on first run (state persistence)
+├── .github/workflows/bounty-scout.yml
+├── scout_bounties.py
+├── test_scout_bounties.py
+├── seen_bounties.json
 └── README.md
 ```
 
-### 2. Choose Your Notification Method
+### GitHub Issue 通知
 
-#### 📬 Option A: Native GitHub Issues (Zero Setup - Recommended)
-The script will automatically open a structured issue labeled `bounty-alert` in your own repository containing links to the new opportunities.
-- **Why it's great:** Zero setup! You will get an email and/or mobile push notification directly from the GitHub app if you are watching your repository.
-- **Setup:** None required. The built-in `GITHUB_TOKEN` handles everything.
+无需额外配置。工作流会在本仓库创建带 `bounty-alert` 标签的结构化 Issue；扫描器会排除这些通知 Issue，避免反馈循环。
 
----
+### Telegram
 
-#### 💬 Option B: Telegram Channel/Chat Alerts
-The scout will send markdown alerts directly to your Telegram chat or channel.
+在仓库的 **Settings → Secrets and variables → Actions** 添加：
 
-1. **Create a Bot:** Message `@BotFather` on Telegram, send `/newbot`, and copy the **API Token**.
-2. **Get your Chat ID:** Send a message to your new bot, then open `https://api.telegram.org/botYOUR_BOT_TOKEN/getUpdates` in your browser. Look for `"chat":{"id":123456789}`. Copy that numeric ID.
-3. **Add Secrets to GitHub:**
-   - Go to your repository **Settings** > **Secrets and variables** > **Actions**.
-   - Create a repository secret named `TELEGRAM_BOT_TOKEN` with your bot's token.
-   - Create a repository secret named `TELEGRAM_CHAT_ID` with your numeric chat ID.
+- `TELEGRAM_BOT_TOKEN`：从 `@BotFather` 获取；
+- `TELEGRAM_CHAT_ID`：目标聊天或频道 ID。
 
----
+### Discord
 
-#### 🎮 Option C: Discord Channel Alerts
-The scout will push formatted alerts directly to a channel in your Discord server.
+创建频道 Webhook，然后添加仓库 Secret `DISCORD_WEBHOOK_URL`。
 
-1. **Create Webhook:** Go to your Discord server, click channel settings (gear icon) > **Integrations** > **Webhooks** > **Create Webhook**. Copy the Webhook URL.
-2. **Add Secrets to GitHub:**
-   - Go to your repository **Settings** > **Secrets and variables** > **Actions**.
-   - Create a repository secret named `DISCORD_WEBHOOK_URL` with your webhook URL.
+## 状态与限制
 
----
-
-## 🧪 Triggering Manually
-You can test the setup immediately without waiting for the next hour:
-1. Go to your repository on GitHub.
-2. Click on the **Actions** tab.
-3. Select **Scout Active Bounties Hourly** from the sidebar.
-4. Click the **Run workflow** dropdown and select **Run workflow**.
-
-Happy bounty hunting! 🚀
+- 去重键是候选的原始 GitHub URL；同一活动若有多个不同文档，仍可能出现多条，方便人工选择最完整来源。
+- GitHub Search 只返回索引到的内容，刚提交的文件、外链页面正文和仅存在于 Discussion 的内容不保证可见；Markdown 中出现的外链和提交说明仍会被提取。
+- `seen_bounties.json` 只在非 dry-run 且存在新结果时追加，已有顺序保持不变，避免每小时产生大面积无意义 diff。
