@@ -34,6 +34,7 @@ DOCUMENT_RESULTS_PER_QUERY = 6
 CODE_SEARCH_INTERVAL_SECONDS = 7
 MAX_RATE_LIMIT_RETRIES = 3
 RATE_LIMIT_FALLBACK_SECONDS = 60
+FILTER_SAMPLE_LIMIT = 7
 
 # Keep the legacy Issue scan, but broaden the vocabulary beyond "bounty".
 ISSUE_SEARCH_QUERIES = [
@@ -47,6 +48,7 @@ ISSUE_SEARCH_QUERIES = [
     'is:issue is:open "cash reward" in:title,body sort:updated-desc',
     "is:issue is:open payment in:title,body sort:updated-desc",
     "is:issue is:open payout in:title,body sort:updated-desc",
+    "is:issue is:open compensation in:title,body sort:updated-desc",
     "is:issue is:open reward in:title,body sort:updated-desc",
 ]
 
@@ -60,6 +62,10 @@ DOCUMENT_SEARCH_QUERIES = [
     ('paid contribution + issue', '"paid contribution" issue language:Markdown'),
     ('micro bounty + available', '"micro bounty" available language:Markdown'),
     ('paid PR', '"paid PR" language:Markdown'),
+    ('paid after merge', '"paid after merge" language:Markdown'),
+    ('paid upon acceptance', '"paid upon acceptance" language:Markdown'),
+    ('payment after accepted PR', '"payment after accepted PR" language:Markdown'),
+    ('compensation + Pull Request', 'compensation "pull request" language:Markdown'),
     ('prize pool + task', '"prize pool" task language:Markdown'),
     ('engineering challenge + reward', '"engineering challenge" reward language:Markdown'),
 ]
@@ -71,6 +77,7 @@ README_SEARCH_TERMS = [
     "paid challenge",
     "contributor reward",
     "micro bounty",
+    "compensation",
 ]
 
 STRONG_REWARD_TERMS = (
@@ -86,6 +93,9 @@ STRONG_REWARD_TERMS = (
     "paid issue",
     "paid pr",
     "paid task",
+    "paid after merge",
+    "paid upon acceptance",
+    "payment after accepted pr",
     "monetary reward",
     "bounty",
 )
@@ -205,19 +215,6 @@ HEAVY_SCOPE_TERMS = (
     "multi-week",
     "architecture redesign",
 )
-NOISY_DOCUMENT_PATH_TERMS = (
-    " — archive/",
-    " — docs/old/",
-    " — changelog",
-    " — release-notes/",
-    " — release_notes/",
-    "privacy-policy-historical",
-    "antigravity-threads/",
-    "implementation_complete",
-    " — skill.md",
-    "/skill.md",
-)
-
 PAYMENT_METHOD_PATTERNS = (
     ("PayPal", r"\bpaypal\b"),
     ("Wise", r"\bwise\b"),
@@ -278,6 +275,19 @@ AMOUNT_PATTERNS = (
 
 def log(message):
     print(message, file=sys.stderr)
+
+
+def add_diagnostic_sample(samples, reason, url):
+    if not url:
+        return
+    urls = samples.setdefault(reason, [])
+    if url not in urls and len(urls) < FILTER_SAMPLE_LIMIT:
+        urls.append(url)
+
+
+def log_diagnostic_samples(source, samples):
+    for reason in sorted(samples):
+        log(f"{source} triage sample [{reason}]: {', '.join(samples[reason])}")
 
 
 def load_seen_bounties(state_file=STATE_FILE):
@@ -558,6 +568,17 @@ def has_task_contributor_reward_link(text, reward_label=False):
     if explicit_offer:
         return True
 
+    completion_payment = re.search(
+        r"\b(?:paid|payment|payout|compensation)\b.{0,40}\b(?:after|upon)\s+(?:the\s+)?"
+        r"(?:merge|acceptance|accepted (?:pr|pull request)|completion)\b"
+        r"|\b(?:after|upon)\s+(?:the\s+)?(?:merge|acceptance|accepted (?:pr|pull request)|completion)\b"
+        r".{0,40}\b(?:paid|payment|payout|compensation)\b",
+        lower,
+        re.DOTALL,
+    )
+    if completion_payment:
+        return True
+
     reward_heading = r"(?:^|\n)\s*(?:[^\w\n]{0,4}\s*)?reward\s*(?::|[-–—]|\n)"
     coding_action = r"\b(?:fix|implement|add|create|write|test|document)\b|修复|实现|编写|测试|文档"
     if re.search(reward_heading + r".{0,300}" + coding_action, lower, re.DOTALL) or re.search(
@@ -571,7 +592,10 @@ def has_task_contributor_reward_link(text, reward_label=False):
         r"(?:submit(?:ter|ting|ted|s)?|submission|pull request|\bpr\b|contributors?|participants?|entrants?"
         r"|accepted reports?|merge[sd]?|contribut(?:e|ion|ors?)|提交|贡献|合并|作者|参与者)"
     )
-    reward = r"(?:claim|earn|receive|get paid|be paid|award(?:ed)?|reward(?:ed)?|bounty|prize|payment|奖励|发放)"
+    reward = (
+        r"(?:claim|earn|receive|get paid|be paid|award(?:ed)?|reward(?:ed)?|bounty|prize|payment|payout"
+        r"|compensation|奖励|发放)"
+    )
     return bool(
         re.search(contribution + r".{0,240}" + reward, lower, re.DOTALL)
         or re.search(reward + r".{0,240}" + contribution, lower, re.DOTALL)
@@ -596,8 +620,23 @@ def is_non_cash_only_reward(text):
         return False
     if set(extract_payment_methods(text)) & FIAT_PAYMENT_METHODS:
         return False
+    fiat_amount = (
+        r"(?:(?:US\$|USD|EUR|GBP|CNY|RMB|CAD|AUD|INR|€|£|¥|₹|\$)\s*\d[\d,]*(?:\.\d+)?"
+        r"|\d[\d,]*(?:\.\d+)?\s*(?:USD|EUR|GBP|CNY|RMB|CAD|AUD|INR))"
+    )
+    non_cash = "(?:" + "|".join(pattern for _, pattern in NON_CASH_REWARD_PATTERNS) + ")"
+    reward_joiner = r"\s*(?:cash\s*)?(?:\+|plus\b|and\b|or\b)\s*(?:an?\s+|the\s+)?"
+    mixed_reward = re.search(
+        fiat_amount + reward_joiner + non_cash
+        + r"|" + non_cash + reward_joiner + fiat_amount + r"(?:\s*cash\b)?",
+        text,
+        re.IGNORECASE,
+    )
+    if mixed_reward:
+        return False
     cash_alternative = re.search(
         r"\b(?:cash prize|cash reward|cash payment|paid via (?:paypal|wise|stripe)|bank transfer|wire transfer)\b"
+        r"|" + fiat_amount + r"\s*cash\b"
         r"|现金(?:奖励|奖品|支付|发放)|银行转账|支付宝|微信支付",
         text,
         re.IGNORECASE,
@@ -623,6 +662,9 @@ def has_document_reward_assertion(context):
         "paid issue",
         "paid pr",
         "paid task",
+        "paid after merge",
+        "paid upon acceptance",
+        "payment after accepted pr",
         "monetary reward",
         "contributor reward",
         "prize pool",
@@ -646,7 +688,7 @@ def has_document_reward_assertion(context):
         return True
 
     amount = r"(?:(?:US\$|USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC|€|£|¥|₹|\$)\s*\d|\d[\d,]*\s*(?:USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC))"
-    reward = r"(?:bounty|reward|prize|payout|paid|winner)"
+    reward = r"(?:bounty|reward|prize|payment|payout|compensation|paid|winner)"
     return bool(
         re.search(reward + r".{0,160}" + amount, lower, re.DOTALL)
         or re.search(amount + r".{0,160}" + reward, lower, re.DOTALL)
@@ -666,9 +708,9 @@ def has_actionable_document_offer(context, submission):
 
     aggregator = re.search(
         r"\b(?:platform|system|marketplace|application|app|dapp|tool)\b.{0,160}"
-        r"\b(?:discover|search|browse|track|manage|post|paid contribution opportunities|bounties)\b"
+        r"\b(?:discover|search|browse|track|manage|post|paid contribution opportunities|bount(?:y|ies))\b"
         r"|\b(?:discover|search|browse|track|list|aggregate)\b.{0,100}"
-        r"\b(?:bounty issues|bounties|paid contribution opportunities)\b",
+        r"\b(?:bounty issues|bount(?:y|ies)|paid contribution opportunities)\b",
         lower,
         re.DOTALL,
     )
@@ -692,10 +734,6 @@ def has_actionable_document_offer(context, submission):
     return submission != "待确认" and bool(
         re.search(r"\b(?:cash prize|cash reward|paid bounty|reward for|bounty for|prize for)\b", lower)
     )
-
-
-def document_path_from_title(title):
-    return title.split(" — ", 1)[-1].strip()
 
 
 def payment_context(text):
@@ -967,72 +1005,62 @@ def analyze_candidate(
     now=None,
     platform_payment_rule=None,
     reward_offer_confirmed=False,
+    rejection_reasons=None,
 ):
     """Normalize and score an Issue or Markdown document candidate."""
     context = relevant_context(text)
     focused_text = "\n".join(part for part in (title, context) if part)
     lower = focused_text.lower()
 
+    def reject(reason):
+        if rejection_reasons is not None:
+            rejection_reasons.append(reason)
+        return None
+
     if any(term in lower for term in SPAM_TERMS + JOB_TERMS):
-        return None
+        return reject("spam/job")
     if any(term in lower for term in LONG_PROJECT_TERMS):
-        return None
+        return reject("heavy scope")
     full_lower = text.lower()
     if sum(term in full_lower for term in HEAVY_SCOPE_TERMS) >= 2 and not any(
         term in full_lower for term in MICRO_TASK_TERMS
     ):
-        return None
-    if source == "Repository Markdown" and any(term in lower for term in NOISY_DOCUMENT_PATH_TERMS):
-        return None
+        return reject("heavy scope")
     if source == "Repository Markdown" and re.search(r"\b(?:2|3|4|5|6|7|8|9|1\d)\s*[- ]?months?\b", lower):
-        return None
+        return reject("heavy scope")
     if not reward_offer_confirmed and not has_task_contributor_reward_link(text):
-        return None
+        return reject("no reward link")
     if is_non_cash_only_reward(text):
-        return None
+        return reject("non-cash")
 
     amounts = extract_reward_amounts(text)
     methods = merge_payment_methods(extract_payment_methods(text), platform_payment_rule)
     if is_crypto_only_payment(methods, text):
-        return None
+        return reject("crypto-only")
     strong_hit = any(term in lower for term in STRONG_REWARD_TERMS)
     generic_hit = any(term in lower for term in GENERIC_REWARD_TERMS)
     cash_hit = bool(amounts or methods or re.search(r"\bcash\b|\bpaid\b|\bmonetary\b", lower))
     if not strong_hit and not (generic_hit and cash_hit):
-        return None
+        return reject("no reward link")
     if source == "Repository Markdown" and not has_document_reward_assertion(context):
-        return None
+        return reject("no reward link")
 
     micro_hit = any(term in lower for term in MICRO_TASK_TERMS)
     coding_hit = any(term in lower for term in CODING_TASK_TERMS)
     large_event = any(term in lower for term in ("hackathon", "game jam", "multi-day competition"))
     if large_event and not micro_hit:
-        return None
-    if source == "Repository Markdown":
-        path = document_path_from_title(title)
-        named_path = " — " not in title or candidate_markdown_path(path)
-        explicit_cash_offer = re.search(
-            r"\b(?:cash prize|cash reward|paid bounty|paid challenge|monetary reward)\b",
-            context,
-            re.IGNORECASE,
-        )
-        if not named_path and not (explicit_cash_offer and amounts):
-            return None
-        basename = path.lower().rsplit("/", 1)[-1]
-        generic_doc = basename.startswith(("readme", "contributing"))
-        if generic_doc and not (amounts or methods or explicit_cash_offer):
-            return None
+        return reject("heavy scope")
 
     deadline = extract_deadline(text)
     deadline_date = parsed_deadline_date(deadline)
     current = now or datetime.now(timezone.utc)
     if deadline_date and deadline_date.date() < current.date():
-        return None
+        return reject("expired")
 
     submission = extract_submission(text)
     qualification_submission = extract_submission(context)
     if source == "Repository Markdown" and not has_actionable_document_offer(context, qualification_submission):
-        return None
+        return reject("no reward link")
     score = 3 if strong_hit else 0
     score += 2 if amounts else 0
     score += 1 if methods else 0
@@ -1063,27 +1091,76 @@ def analyze_candidate(
     }
 
 
-def is_clean_issue(item, host_repo=None):
-    """Retain original safeguards and prevent alert feedback loops."""
+def issue_label_names(item):
+    return {
+        str(label.get("name", "")).strip().lower()
+        for label in item.get("labels", [])
+        if isinstance(label, dict)
+    }
+
+
+def exclusive_claim_rule(text):
+    return bool(
+        re.search(
+            r"\bonly (?:the )?(?:assigned contributor|assignee|claimant)\b.{0,80}\b(?:eligible|may|can|will)\b"
+            r"|\bonce (?:assigned|claimed)\b.{0,120}\b(?:others?|other contributors?)\b.{0,60}"
+            r"\b(?:cannot|can't|may not|must not|not eligible)\b"
+            r"|\b(?:do not|don't) (?:start|work|submit|open (?:a )?(?:pr|pull request))\b.{0,80}"
+            r"\b(?:already assigned|already claimed|unless (?:you are )?assigned)\b"
+            r"|\bno longer available once claimed\b"
+            r"|仅限(?:被)?(?:分配|认领)(?:的)?(?:贡献者|人员|用户)|已认领后.{0,40}(?:其他人|他人).{0,30}(?:不能|不可)",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+
+def issue_is_explicitly_completed(item):
+    labels = issue_label_names(item)
+    if labels & {"completed", "done", "resolved", "fixed", "status: completed", "status: done"}:
+        return True
+    body = str(item.get("body") or "")
+    return bool(
+        re.search(
+            r"\b(?:this|the) (?:issue|task|bounty) (?:has been|is) (?:completed|done|resolved|finished)\b"
+            r"|(?:^|\n)\s*(?:status\s*:\s*)?(?:completed|done|resolved)\s*(?:\n|$)"
+            r"|(?:当前)?(?:任务|悬赏)(?:已经|已)(?:完成|结束|解决)",
+            body,
+            re.IGNORECASE,
+        )
+    )
+
+
+def issue_safeguard_reason(item, host_repo=None):
+    """Return a hard-filter reason; ordinary participation is competition only."""
     if item.get("state") not in (None, "open"):
-        return False
-    if "pull_request" in item or item.get("assignees"):
-        return False
-    if int(item.get("comments", 0) or 0) > MAX_COMMENTS:
-        return False
-    labels = {str(label.get("name", "")).lower() for label in item.get("labels", []) if isinstance(label, dict)}
+        return "completed"
+    if "pull_request" in item:
+        return "pull request"
+    labels = issue_label_names(item)
     if "bounty-alert" in labels:
-        return False
+        return "host alert"
+    if "radar" in labels:
+        return "radar"
     if any(
-        label in {"radar", "claimed", "in progress", "bounty-large", "size: large", "size/large"}
-        or label.endswith("-large")
+        label in {"bounty-large", "size: large", "size/large"} or label.endswith("-large")
         for label in labels
     ):
-        return False
+        return "heavy scope"
+    if issue_is_explicitly_completed(item):
+        return "completed"
+    participating = bool(item.get("assignees") or labels & {"claimed", "in progress", "assigned"})
+    text = "\n".join((str(item.get("title") or ""), str(item.get("body") or "")))
+    if participating and exclusive_claim_rule(text):
+        return "assigned / claimed"
     repository_url = str(item.get("repository_url", ""))
     if host_repo and repository_url.rstrip("/").endswith("/repos/" + host_repo):
-        return False
-    return True
+        return "host repository"
+    return ""
+
+
+def is_clean_issue(item, host_repo=None):
+    return not issue_safeguard_reason(item, host_repo)
 
 
 def has_issue_reward_offer(item):
@@ -1107,38 +1184,7 @@ def has_issue_reward_offer(item):
 
     labels = [str(label.get("name") or "").lower() for label in item.get("labels", []) if isinstance(label, dict)]
     reward_label = any("bounty" in label or "reward" in label for label in labels)
-    if not has_task_contributor_reward_link(combined, reward_label=reward_label):
-        return False
-    if reward_label:
-        return True
-
-    explicit_title = re.search(
-        r"(?:^|[\[(:-])\s*(?:micro\s+)?bounty\b|\b(?:cash prize|cash reward|paid task|paid challenge|paid contribution|contributor reward)\b",
-        lower_title,
-    )
-    title_amount = any(re.search(pattern, title, re.IGNORECASE) for pattern in AMOUNT_PATTERNS)
-    if explicit_title and (title_amount or re.search(r"\b(?:fix|implement|add|build|create|write|test|document)\b", lower_title)):
-        return True
-
-    amount = (
-        r"(?:(?:US\$|USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC|€|£|¥|₹|\$)\s*\d"
-        r"|\d[\d,]*(?:\.\d+)?\s*(?:USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC))"
-    )
-    heading_offer = (
-        r"(?:^|\n)\s*(?:#{1,6}\s*)?(?:[^\w\n]{0,3}\s*)?"
-        r"(?:bounty|reward|payment|payout|cash prize)\s*(?::|[-–—])?.{0,100}"
-    )
-    if re.search(heading_offer + amount, lower_body, re.DOTALL):
-        return True
-    if re.search(r"\b(?:will pay|we pay|offering)\b.{0,100}" + amount, lower_body, re.DOTALL):
-        return True
-    return bool(
-        re.search(
-            r"\b(?:this|the) (?:issue|task|contribution)\b.{0,120}\b(?:is paid|will be paid|has a bounty|earns? a reward)\b",
-            lower_body,
-            re.DOTALL,
-        )
-    )
+    return has_task_contributor_reward_link(combined, reward_label=reward_label)
 
 
 def is_radar_issue(item):
@@ -1267,27 +1313,45 @@ def first_win_rule(text):
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in FIRST_WIN_PATTERNS)
 
 
-def apply_pr_competition(candidate, pr_info, text):
-    """Attach PR counts and apply a modest ranking penalty without filtering."""
+def apply_pr_competition(candidate, pr_info, text, item=None):
+    """Attach participation signals and apply ranking penalties without filtering."""
+    item = item or {}
     open_count = pr_info.get("open_pr_count")
     merged_count = pr_info.get("merged_pr_count")
     first_wins = first_win_rule(text)
+    labels = issue_label_names(item)
+    participation_labels = sorted(labels & {"assigned", "claimed", "in progress"})
+    assignee_count = len(item.get("assignees") or [])
+    comments = int(item.get("comments", 0) or 0)
     candidate["open_pr_count"] = open_count
     candidate["merged_pr_count"] = merged_count
     candidate["first_wins"] = first_wins
-    if open_count is None:
-        candidate["competition"] = "待确认（相关 PR 检查失败）"
-        return candidate
-    if not open_count:
-        candidate["competition"] = "未发现相关 open PR"
-        return candidate
+    candidate["assignee_count"] = assignee_count
+    candidate["participation_labels"] = participation_labels
+    signals = []
+    penalty = 0
 
-    if first_wins:
-        penalty = min(open_count * 3, 9)
-        candidate["competition"] = f"高：{open_count} 个相关 open PR，且规则为 first wins"
-    else:
-        penalty = min(open_count, 3)
-        candidate["competition"] = f"有竞争：{open_count} 个相关 open PR"
+    if assignee_count:
+        signals.append(f"{assignee_count} 个 assignee")
+        penalty += min(assignee_count, 2)
+    if participation_labels:
+        signals.append("/".join(participation_labels))
+        penalty += 1
+    if comments > MAX_COMMENTS:
+        signals.append(f"{comments} 条评论")
+        penalty += min(1 + comments // 50, 3)
+
+    if open_count is None:
+        signals.append("相关 PR 检查失败")
+    elif open_count:
+        if first_wins:
+            penalty += min(open_count * 3, 9)
+            signals.append(f"{open_count} 个相关 open PR，且规则为 first wins")
+        else:
+            penalty += min(open_count, 3)
+            signals.append(f"{open_count} 个相关 open PR")
+
+    candidate["competition"] = "有竞争：" + "；".join(signals) if signals else "未发现明显竞争"
     candidate["score"] -= penalty
     return candidate
 
@@ -1430,6 +1494,7 @@ def scan_issues(token=None, host_repo=None):
     candidates = []
     seen_api_urls = set()
     seen_search_urls = set()
+    diagnostic_samples = {}
     stats = {
         "raw": 0,
         "duplicates": 0,
@@ -1468,6 +1533,7 @@ def scan_issues(token=None, host_repo=None):
                     continue
                 seen_api_urls.add(url)
                 platform_rule = verified_platform_payment_rule(text=resolved["text"], url=url)
+                rejection_reasons = []
                 candidate = analyze_candidate(
                     title=resolved["title"],
                     project=resolved["project"],
@@ -1475,6 +1541,7 @@ def scan_issues(token=None, host_repo=None):
                     source="Repository Markdown",
                     text=resolved["text"],
                     platform_payment_rule=platform_rule,
+                    rejection_reasons=rejection_reasons,
                 )
                 if candidate:
                     if resolved["kind"] == "external":
@@ -1485,6 +1552,11 @@ def scan_issues(token=None, host_repo=None):
                     stats["matched"] += 1
                 else:
                     stats["analysis_filtered"] += 1
+                    add_diagnostic_sample(
+                        diagnostic_samples,
+                        rejection_reasons[0] if rejection_reasons else "other",
+                        url,
+                    )
                 continue
 
             item = resolved["item"]
@@ -1495,14 +1567,22 @@ def scan_issues(token=None, host_repo=None):
             if url in seen_api_urls:
                 stats["duplicates"] += 1
                 continue
-            if not is_clean_issue(item, host_repo):
+            safeguard_reason = issue_safeguard_reason(item, host_repo)
+            if safeguard_reason:
                 stats["safeguards"] += 1
+                add_diagnostic_sample(diagnostic_samples, safeguard_reason, url)
                 continue
             if not has_issue_reward_offer(item):
                 stats["no_reward_offer"] += 1
+                add_diagnostic_sample(diagnostic_samples, "no reward link", url)
                 continue
             seen_api_urls.add(url)
             text = "\n".join((str(item.get("title") or ""), str(item.get("body") or "")))
+            labels_set = issue_label_names(item)
+            if item.get("assignees") or labels_set & {"assigned", "claimed", "in progress"}:
+                add_diagnostic_sample(diagnostic_samples, "assigned / claimed (competition)", url)
+            if int(item.get("comments", 0) or 0) > MAX_COMMENTS:
+                add_diagnostic_sample(diagnostic_samples, "too many comments (competition)", url)
             repo = str(item.get("repository_url", "")).split("/repos/")[-1]
             if not repo:
                 repo = url.removeprefix("https://github.com/").split("/issues/")[0]
@@ -1512,6 +1592,7 @@ def scan_issues(token=None, host_repo=None):
                 if isinstance(label, dict)
             ]
             platform_rule = verified_platform_payment_rule(text=text, labels=labels, url=url)
+            rejection_reasons = []
             candidate = analyze_candidate(
                 title=str(item.get("title") or "Untitled bounty"),
                 project=repo,
@@ -1522,19 +1603,26 @@ def scan_issues(token=None, host_repo=None):
                 updated_at=item.get("updated_at"),
                 platform_payment_rule=platform_rule,
                 reward_offer_confirmed=True,
+                rejection_reasons=rejection_reasons,
             )
             if candidate:
                 pr_info = fetch_related_pr_info(item, token)
                 if pr_info["completed_by_merged_pr"]:
                     stats["merged_completed"] += 1
+                    add_diagnostic_sample(diagnostic_samples, "merged/completed", url)
                     continue
-                apply_pr_competition(candidate, pr_info, text)
+                apply_pr_competition(candidate, pr_info, text, item=item)
                 if resolved.get("discovered_via"):
                     candidate["discovered_via"] = resolved["discovered_via"]
                 candidates.append(candidate)
                 stats["matched"] += 1
             else:
                 stats["analysis_filtered"] += 1
+                add_diagnostic_sample(
+                    diagnostic_samples,
+                    rejection_reasons[0] if rejection_reasons else "other",
+                    url,
+                )
     log(
         "Issue scan summary (Actions log only): "
         f"raw={stats['raw']}, unique={len(seen_search_urls)}, duplicates={stats['duplicates']}, "
@@ -1543,16 +1631,30 @@ def scan_issues(token=None, host_repo=None):
         f"merged_completed={stats['merged_completed']}, "
         f"matched={stats['matched']}"
     )
+    log_diagnostic_samples("Issue", diagnostic_samples)
     return candidates
 
 
 def candidate_markdown_path(path):
+    """Prioritize likely offer documents during fallback discovery only."""
     lower = path.lower()
     if not lower.endswith((".md", ".markdown", ".mdx")):
         return False
     basename = lower.rsplit("/", 1)[-1]
     return basename.startswith(("readme", "contributing")) or any(
-        term in lower for term in ("bounty", "challenge", "reward", "prize", "contribut")
+        term in lower
+        for term in (
+            "bounty",
+            "challenge",
+            "reward",
+            "prize",
+            "contribut",
+            "governance",
+            "program",
+            "payout",
+            "payment",
+            "compensation",
+        )
     )
 
 
@@ -1661,8 +1763,10 @@ def scan_documents(token=None):
         documents = fetch_readme_fallback_documents(token)
 
     candidates = []
+    diagnostic_samples = {}
     for document in documents:
         platform_rule = verified_platform_payment_rule(text=document["text"], url=document["url"])
+        rejection_reasons = []
         candidate = analyze_candidate(
             title=document["title"],
             project=document["project"],
@@ -1670,13 +1774,21 @@ def scan_documents(token=None):
             source="Repository Markdown",
             text=document["text"],
             platform_payment_rule=platform_rule,
+            rejection_reasons=rejection_reasons,
         )
         if candidate:
             candidates.append(candidate)
+        else:
+            add_diagnostic_sample(
+                diagnostic_samples,
+                rejection_reasons[0] if rejection_reasons else "other",
+                document["url"],
+            )
     log(
         "Document scan summary (Actions log only): "
         f"fetched={len(documents)}, analysis_filtered={len(documents) - len(candidates)}, matched={len(candidates)}"
     )
+    log_diagnostic_samples("Document", diagnostic_samples)
     return candidates
 
 

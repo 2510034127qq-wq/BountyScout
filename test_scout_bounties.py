@@ -180,6 +180,7 @@ class CandidateAnalysisTests(unittest.TestCase):
             "Reward: 500 points after the PR is merged.",
             "Reward: a completion certificate after the PR is merged.",
             "Reward: a physical prize after the PR is merged.",
+            "Reward: a gift card after the PR is merged. The product price is $100.",
         )
         for index, reward in enumerate(rewards):
             with self.subTest(reward=reward):
@@ -210,6 +211,60 @@ class CandidateAnalysisTests(unittest.TestCase):
         self.assertEqual(candidate["reward"], "$50")
         self.assertEqual(candidate["payment_method"], "PayPal")
 
+    def test_explicit_cash_amount_keeps_mixed_non_cash_extras(self):
+        rewards = (
+            "Reward: $100 + a gift card after merge.",
+            "Reward: $50 cash + swag after merge.",
+        )
+        for index, reward in enumerate(rewards):
+            with self.subTest(reward=reward):
+                candidate = scout.analyze_candidate(
+                    "[BOUNTY] Small parser fix",
+                    "example/parser",
+                    f"https://github.com/example/parser/issues/{100 + index}",
+                    "GitHub Issue",
+                    f"{reward} Fix the parser and submit a pull request.",
+                    now=NOW,
+                )
+                self.assertIsNotNone(candidate)
+
+    def test_repository_markdown_filename_is_not_a_hard_filter(self):
+        for filename in ("GOVERNANCE.md", "PROGRAM.md", "REWARDS.md"):
+            with self.subTest(filename=filename):
+                candidate = scout.analyze_candidate(
+                    f"example/project — {filename}",
+                    "example/project",
+                    f"https://github.com/example/project/blob/main/{filename}",
+                    "Repository Markdown",
+                    "Compensation: USD 125. Contributors are paid after merge via PayPal. "
+                    "Implement one policy check and submit a pull request.",
+                    now=NOW,
+                )
+                self.assertIsNotNone(candidate)
+
+    def test_completion_payment_phrases_link_contribution_to_reward(self):
+        offers = (
+            "Payout: $100. Contributors receive the payout after merge.",
+            "Compensation: USD 80, paid upon acceptance.",
+            "You are paid after merge: $75.",
+            "Payment after accepted PR: $90.",
+        )
+        for index, offer in enumerate(offers):
+            with self.subTest(offer=offer):
+                text = f"{offer} Fix one parser edge case and submit a pull request."
+                item = {"title": "Small parser task", "body": text, "labels": []}
+                self.assertTrue(scout.has_issue_reward_offer(item))
+                self.assertIsNotNone(
+                    scout.analyze_candidate(
+                        "Small parser task",
+                        "example/parser",
+                        f"https://github.com/example/parser/issues/{110 + index}",
+                        "GitHub Issue",
+                        text,
+                        now=NOW,
+                    )
+                )
+
     def test_rejects_jobs_large_events_and_expired_deadlines(self):
         cases = [
             "Paid challenge with a $500 salary range. We are hiring for a full-time role.",
@@ -237,6 +292,7 @@ class TriageAndStateTests(unittest.TestCase):
             'is:issue is:open "cash reward" in:title,body sort:updated-desc',
             "is:issue is:open payment in:title,body sort:updated-desc",
             "is:issue is:open payout in:title,body sort:updated-desc",
+            "is:issue is:open compensation in:title,body sort:updated-desc",
             "is:issue is:open reward in:title,body sort:updated-desc",
         }
         self.assertTrue(expected.issubset(set(scout.ISSUE_SEARCH_QUERIES)))
@@ -249,13 +305,24 @@ class TriageAndStateTests(unittest.TestCase):
         }
         self.assertTrue(scout.is_clean_issue(base))
         self.assertFalse(scout.is_clean_issue({**base, "state": "closed"}))
-        self.assertFalse(scout.is_clean_issue({**base, "assignees": [{"login": "taken"}]}))
-        self.assertFalse(scout.is_clean_issue({**base, "comments": 26}))
+        self.assertTrue(scout.is_clean_issue({**base, "assignees": [{"login": "taken"}]}))
+        self.assertTrue(scout.is_clean_issue({**base, "comments": 26}))
+        self.assertTrue(scout.is_clean_issue({**base, "labels": [{"name": "claimed"}]}))
+        self.assertTrue(scout.is_clean_issue({**base, "labels": [{"name": "in progress"}]}))
         self.assertFalse(scout.is_clean_issue({**base, "pull_request": {}}))
         self.assertFalse(scout.is_clean_issue({**base, "labels": [{"name": "bounty-alert"}]}))
         self.assertFalse(scout.is_clean_issue({**base, "labels": [{"name": "bounty-large"}]}))
         self.assertFalse(scout.is_clean_issue({**base, "labels": [{"name": "radar"}]}))
         self.assertFalse(scout.is_clean_issue(base, "owner/repo"))
+        exclusive = {
+            **base,
+            "assignees": [{"login": "taken"}],
+            "body": "Only the assigned contributor is eligible; others may not submit.",
+        }
+        self.assertFalse(scout.is_clean_issue(exclusive))
+        self.assertEqual(scout.issue_safeguard_reason(exclusive), "assigned / claimed")
+        self.assertFalse(scout.is_clean_issue({**base, "labels": [{"name": "completed"}]}))
+        self.assertFalse(scout.is_clean_issue({**base, "body": "This task has been completed."}))
 
     def test_issue_requires_an_actual_reward_offer(self):
         genuine = {
@@ -510,6 +577,9 @@ class TriageAndStateTests(unittest.TestCase):
     def test_candidate_markdown_path(self):
         self.assertTrue(scout.candidate_markdown_path(".github/CONTRIBUTING.md"))
         self.assertTrue(scout.candidate_markdown_path("events/mini-challenge.mdx"))
+        self.assertTrue(scout.candidate_markdown_path("docs/GOVERNANCE.md"))
+        self.assertTrue(scout.candidate_markdown_path("PROGRAM.md"))
+        self.assertTrue(scout.candidate_markdown_path("REWARDS.md"))
         self.assertFalse(scout.candidate_markdown_path("src/challenge.py"))
 
     def test_state_save_preserves_existing_order_and_appends(self):
@@ -665,6 +735,26 @@ class TriageAndStateTests(unittest.TestCase):
         self.assertEqual(first_wins["score"], 4)
         self.assertTrue(first_wins["first_wins"])
 
+    def test_assignee_claim_and_busy_comments_are_competition_signals(self):
+        item = {
+            "assignees": [{"login": "working"}],
+            "labels": [{"name": "claimed"}],
+            "comments": 60,
+        }
+        candidate = scout.apply_pr_competition(
+            {"score": 10},
+            {"open_pr_count": 0, "merged_pr_count": 0},
+            "Submissions are reviewed independently.",
+            item=item,
+        )
+
+        self.assertEqual(candidate["assignee_count"], 1)
+        self.assertEqual(candidate["participation_labels"], ["claimed"])
+        self.assertEqual(candidate["score"], 6)
+        self.assertIn("1 个 assignee", candidate["competition"])
+        self.assertIn("claimed", candidate["competition"])
+        self.assertIn("60 条评论", candidate["competition"])
+
     def test_soroban_476_is_competitive_but_filtered_by_grantfox_payment(self):
         item = {
             "number": 476,
@@ -741,6 +831,31 @@ class TriageAndStateTests(unittest.TestCase):
         self.assertIn("raw=0", summary)
         self.assertIn("matched=0", summary)
 
+    def test_diagnostic_samples_are_bounded_and_include_rejection_reason(self):
+        samples = {}
+        for index in range(scout.FILTER_SAMPLE_LIMIT + 3):
+            scout.add_diagnostic_sample(samples, "no reward link", f"https://example.test/{index}")
+        self.assertEqual(len(samples["no reward link"]), scout.FILTER_SAMPLE_LIMIT)
+
+        reasons = []
+        candidate = scout.analyze_candidate(
+            "[BOUNTY] Tiny parser fix",
+            "example/parser",
+            "https://github.com/example/parser/issues/404",
+            "GitHub Issue",
+            "Reward: a gift card after merge. Fix the parser and submit a pull request.",
+            now=NOW,
+            rejection_reasons=reasons,
+        )
+        self.assertIsNone(candidate)
+        self.assertEqual(reasons, ["non-cash"])
+
+        with mock.patch.object(scout, "log") as logger:
+            scout.log_diagnostic_samples("Issue", samples)
+        logged = logger.call_args.args[0]
+        self.assertIn("Issue triage sample [no reward link]", logged)
+        self.assertIn("https://example.test/0", logged)
+
     def test_scan_keeps_issue_with_open_pr_and_records_competition(self):
         issue = {
             "number": 42,
@@ -748,9 +863,9 @@ class TriageAndStateTests(unittest.TestCase):
             "repository_url": "https://api.github.com/repos/example/parser",
             "title": "[BOUNTY] Fix one parser edge case",
             "body": "Bounty: $50. Fix the parser and submit a Pull Request. Payout via PayPal.",
-            "labels": [{"name": "bounty"}],
-            "assignees": [],
-            "comments": 1,
+            "labels": [{"name": "bounty"}, {"name": "claimed"}],
+            "assignees": [{"login": "working"}],
+            "comments": 60,
             "state": "open",
         }
         open_pr = {
@@ -766,12 +881,19 @@ class TriageAndStateTests(unittest.TestCase):
         }
         with mock.patch.object(scout, "search_endpoint", return_value={"items": [issue]}), mock.patch.object(
             scout, "github_api_get", return_value=[open_pr]
-        ):
+        ), mock.patch.object(scout, "log") as logger:
             candidates = scout.scan_issues("token")
 
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0]["open_pr_count"], 1)
+        self.assertEqual(candidates[0]["assignee_count"], 1)
+        self.assertEqual(candidates[0]["participation_labels"], ["claimed"])
+        self.assertEqual(candidates[0]["comments"], 60)
         self.assertIn("有竞争", candidates[0]["competition"])
+        messages = "\n".join(call.args[0] for call in logger.call_args_list)
+        self.assertIn("assigned / claimed (competition)", messages)
+        self.assertIn("too many comments (competition)", messages)
+        self.assertIn(issue["html_url"], messages)
 
     def test_scan_filters_issue_completed_by_merged_pr(self):
         issue = {

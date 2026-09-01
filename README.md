@@ -8,23 +8,24 @@ BountyScout 是一个无第三方依赖的 GitHub 扫描器，用来发现几十
 
 ### GitHub Issues
 
-扫描开放 Issue 中的 `bounty`、`paid task`、`cash prize`、`cash reward`、`payment`、`payout`、`reward`、`paid challenge`、`paid contribution`、`paid PR` 和 `contributor reward` 等表达。每组查询最多读取最近 50 条结果。原有规则仍然有效：跳过 PR、已有负责人、超过 25 条评论的拥挤任务、广告/博彩/内容写作等噪声。
+扫描开放 Issue 中的 `bounty`、`paid task`、`cash prize`、`cash reward`、`payment`、`payout`、`compensation`、`reward`、`paid challenge`、`paid contribution`、`paid PR` 和 `contributor reward` 等表达。每组查询最多读取最近 50 条结果。PR 本身、广告/博彩/内容写作等噪声仍会跳过；已有负责人、`claimed` / `in progress`、评论较多只作为竞争信号保留并降低排序，除非原文明确规定认领后其他人不能参与。
 
 标记为 radar、aggregator 或 external mirror 的 Issue 只作为发现入口。扫描器最多沿明确的来源链接跟进 3 跳，优先读取原始 GitHub Issue，也支持原始 Markdown 和可直接访问的公开活动页面；只有解析出实际任务后才进入结果。项目名、任务正文、奖励、付款方式、评论数和原始链接均来自最终页面，无法解析来源的 radar 通知不会上报。
 
 ### 仓库 Markdown
 
-有 `GITHUB_TOKEN` 时，使用 GitHub Code Search 查找全站 Markdown，包括：
+有 `GITHUB_TOKEN` 时，使用 GitHub Code Search 查找全站 Markdown。文件名只用于提高发现优先级，最终是否保留由正文中“完成贡献或 PR → 获得报酬”的关系决定，包括：
 
 - README 和 CONTRIBUTING；
 - `CHALLENGE.md`、`BOUNTY.md`、活动说明等独立文件；
+- `GOVERNANCE.md`、`PROGRAM.md`、`REWARDS.md` 等正文明确写出 contributor payout 的文件；
 - 包含 `cash prize`、`prize pool`、`engineering challenge`、`micro bounty` 等表达的其他 Markdown。
 
-没有令牌时，脚本自动降级为 GitHub Repository Search：先查匹配的 README，再检查仓库中名称带 `challenge`、`bounty`、`reward`、`prize` 或 `contribut` 的少量 Markdown。这个模式能运行，但覆盖率低于认证后的 Code Search。
+没有令牌时，脚本自动降级为 GitHub Repository Search：先查匹配的 README，再优先检查仓库中名称带 `challenge`、`bounty`、`reward`、`prize`、`contribut`、`governance`、`program`、`payment` 或 `compensation` 的少量 Markdown。这个模式能运行，但覆盖率低于认证后的 Code Search；文件名始终不是最终硬过滤条件。
 
 ## 筛选和结果字段
 
-候选优先按“明确奖励 + 小任务信号 + 编码任务信号 + 提交方式完整度”排序。奖励必须能与完成当前任务、提交贡献或 PR 合并建立明确关系；游戏币/游戏内 reward、商品价格、业务金额、成本、账户余额和教程示例金额不会仅因出现 `reward`、`payment` 或货币符号而进入候选。奖金金额不作为任务规模过滤条件；大型 Hackathon、招聘/实习岗位、`bounty-large`、明确的长期/重型实现、过期活动、已暂停任务和常见垃圾内容仍会根据任务范围被排除。镜像 Issue 会恢复并去重到最终原始页面，其余不确定候选会保留，避免隐藏悬赏被过度过滤。扫描器还会读取原始 Issue 的 GitHub 时间线：相关 open PR 只记录为竞争并降低排序，first merged/accepted/valid wins 规则下权重更高；只有已合并 PR 明确使用 `Closes`、`Fixes` 或 `Resolves` 完成该 Issue 时才过滤。原始命中、过滤原因和去重数量只记录在 Actions 日志中，提醒 Issue 始终只包含最终候选结果。
+候选优先按“明确奖励 + 小任务信号 + 编码任务信号 + 提交方式完整度”排序。`payout`、`compensation`、`paid after merge`、`paid upon acceptance`、`payment after accepted PR` 等表达也能建立贡献与报酬的关系。游戏币/游戏内 reward、商品价格、业务金额、成本、账户余额和教程示例金额不会仅因出现 `reward`、`payment` 或货币符号而进入候选。奖金金额不作为任务规模过滤条件；大型 Hackathon、招聘/实习岗位、`bounty-large`、明确的长期/重型实现、过期活动、已暂停任务和常见垃圾内容仍会根据任务范围被排除。镜像 Issue 会恢复并去重到最终原始页面，其余不确定候选会保留，避免隐藏悬赏被过度过滤。扫描器还会读取原始 Issue 的 GitHub 时间线：assignee、claimed/in progress、高评论数和相关 open PR 只记录为竞争并降低排序，first merged/accepted/valid wins 规则下 open PR 权重更高；只有明确独占认领规则、Issue 明确完成，或已合并 PR 明确使用 `Closes`、`Fixes` 或 `Resolves` 完成该 Issue 时才过滤。每类主要过滤原因最多 7 个样本 URL、原始命中和去重数量只记录在 Actions 日志中，提醒 Issue 始终只包含最终候选结果。
 
 每条通知尽量给出：
 
@@ -37,7 +38,7 @@ BountyScout 是一个无第三方依赖的 GitHub 扫描器，用来发现几十
 面向中国大陆用户的付款规则：
 
 - 只明确支持 USDC、USDT、DAI、BTC、sats/Lightning、XLM、RTC、ETH、SOL 等加密货币，或要求通过链上钱包地址收款时，候选直接过滤；
-- 只提供京东卡/礼品卡、积分、证书、实物或周边等奖励时直接过滤；若同时明确提供现金或正常法币收款选项则可以保留；
+- 只提供京东卡/礼品卡、积分、证书、实物或周边等奖励时直接过滤；若明确是 `$100 + gift card`、`$50 cash + swag` 等同时含现金/法币的混合奖励则保留；
 - 同时明确支持 PayPal、Wise、Stripe、银行转账、支付宝或微信支付等正常法币渠道时，可以保留；
 - 可结合带官方证据链接的内置平台规则判断；目前 GrantFox 官方文档明确采用 Stellar 链上 USDC payout，因此 GrantFox OSS 候选按 crypto-only 处理；
 - 原文没有明确付款渠道、且未命中已核实平台规则时显示 `待确认`，不会根据美元标价、项目所在地或未核实的平台名称擅自推断可以收款。
