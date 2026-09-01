@@ -35,6 +35,7 @@ CODE_SEARCH_INTERVAL_SECONDS = 7
 MAX_RATE_LIMIT_RETRIES = 3
 RATE_LIMIT_FALLBACK_SECONDS = 60
 FILTER_SAMPLE_LIMIT = 7
+MAX_DISCOVERY_TARGETS = 12
 
 # Keep the legacy Issue scan, but broaden the vocabulary beyond "bounty".
 ISSUE_SEARCH_QUERIES = [
@@ -200,10 +201,16 @@ JOB_TERMS = (
 LONG_PROJECT_TERMS = (
     "multi-month",
     "multi month",
+    "multi-milestone",
+    "multi milestone",
     "semester-long",
     "12-week",
     "six months",
     "long-term commitment",
+    "full security audit",
+    "large empirical reproduction",
+    "long-running project",
+    "long running project",
 )
 HEAVY_SCOPE_TERMS = (
     "meaningful production implementation",
@@ -214,6 +221,22 @@ HEAVY_SCOPE_TERMS = (
     "ios, android, and web",
     "multi-week",
     "architecture redesign",
+)
+PRODUCT_BILLING_TERMS = (
+    "stripe checkout",
+    "stripe credit pack",
+    "stripe-metered",
+    "stripe_payment_id",
+    "subscription price",
+    "subscription tier",
+    "credit pack",
+    "credit pricing",
+    "credit cost",
+    "customer billing",
+    "customer purchase",
+    "billable tool",
+    "api usage price",
+    "tool usage price",
 )
 PAYMENT_METHOD_PATTERNS = (
     ("PayPal", r"\bpaypal\b"),
@@ -532,9 +555,152 @@ def extract_reward_amounts(text):
     return extract_amounts(focused) or extract_amounts(text)
 
 
+def has_explicit_no_current_reward(text):
+    """Return true when the source explicitly denies a funded/current task."""
+    return bool(
+        re.search(
+            r"\bproduction payouts? (?:are |is )?not live yet\b"
+            r"|\bpayment capture remains disabled\b|\bpayouts? (?:are |is )?disabled\b"
+            r"|\b(?:this (?:issue|task) )?does(?: not|n't) have any rewards? yet\b"
+            r"|\b(?:no|without) (?:current )?(?:monetary )?(?:bounty|rewards?) yet\b"
+            r"|\bno reward (?:has been )?added yet\b"
+            r"|\bzero[- ]bounty\b|\bzero monetary rewards?\b"
+            r"|\b(?:this|the) (?:issue|task) is unfunded\b|\bunfunded\b|\bnot funded\b"
+            r"|\bnot a build ticket\b"
+            r"|\b(?:bounty|reward)\s*[:=]\s*(?:\$?0(?:\.0+)?|none)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def has_generic_backing_template(text):
+    return bool(
+        re.search(
+            r"\beveryone can add rewards?\b"
+            r"|\bpost a bounty\b"
+            r"|\bwant to back this issue\b"
+            r"|\b(?:sponsor|fund|back) this issue\b"
+            r"|\badd (?:a |your )?(?:bounty|reward) to this issue\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def has_current_reward_evidence(text, reward_label=False):
+    """Recognize positive evidence that this task is currently funded."""
+    amount = "(?:" + "|".join(AMOUNT_PATTERNS) + ")"
+    explicit_amount = (
+        r"(?:^|\n|[.!?]\s+)\s*(?:#{1,6}\s*)?(?:[*_]{0,2})?(?:current\s+)?"
+        r"(?:bounty|reward|payout)(?:\s+amount)?(?:[*_]{0,2})?\s*[:|=–—-]\s*" + amount
+        + r"|(?:^|\n)[^\n]{0,30}\[(?:bounty|reward)\][^\n]{0,140}" + amount
+        + r"|\b(?:this|the|current) (?:issue|task)\b[^.\n]{0,100}"
+        r"\b(?:has|offers?|is funded (?:with|for))\b[^.\n]{0,60}" + amount
+        + r"|\b(?:added|pledged|funded)\b[^.\n]{0,80}" + amount
+        + r"[^.\n]{0,80}\b(?:bounty|reward)\b"
+    )
+    if re.search(explicit_amount, text, re.IGNORECASE):
+        return True
+    if re.search(
+        r"\b(?:this|the) (?:issue|task|bounty) (?:is|has been) funded\b"
+        r"|\bfunded (?:bounty|reward)\b"
+        r"|\b(?:bounty|reward) bot\b.{0,120}\bconfirmed\b",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        return True
+    first_line = text.splitlines()[0] if text.splitlines() else ""
+    return bool(
+        reward_label
+        and re.search(amount, first_line, re.IGNORECASE)
+        and re.search(r"\b(?:bounty|reward|paid task|cash)\b", first_line, re.IGNORECASE)
+    )
+
+
+def is_historical_reward_summary(title, text):
+    title_lower = title.lower()
+    if re.search(
+        r"\bhall of fame\b|\bleaderboard\b|\bmonthly stats?\b|\bpast (?:payouts?|winners?)\b",
+        title_lower,
+    ) and not has_current_reward_evidence(text):
+        return True
+    history_patterns = (
+        r"\bhall of fame\b",
+        r"\bleaderboard\b",
+        r"\btotal bounty distributed\b",
+        r"\btotal earned\b",
+        r"\bmonthly stats?\b",
+        r"\bpast payouts?\b",
+        r"\bpast winners?\b",
+    )
+    hits = sum(bool(re.search(pattern, text, re.IGNORECASE)) for pattern in history_patterns)
+    return hits >= 2 and not has_current_reward_evidence(text)
+
+
+def is_product_billing_only(text):
+    lower = text.lower()
+    if not any(term in lower for term in PRODUCT_BILLING_TERMS):
+        return False
+    contributor_payout = re.search(
+        r"\b(?:contributors?|submitters?|winners?|accepted (?:pr|pull request)|merged? (?:pr|pull request))\b"
+        r".{0,180}\b(?:paid|payment|payout|compensation|cash reward)\b"
+        r"|\b(?:paid|payment|payout|compensation|cash reward)\b.{0,180}"
+        r"\b(?:contributors?|submitters?|winners?|accepted (?:pr|pull request)|after merge)\b"
+        r"|(?:^|\n)\s*(?:#{1,6}\s*)?(?:bounty|reward)\s*[:–—-].{0,160}",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    return not bool(contributor_payout)
+
+
+def is_discovery_source_document(text):
+    """Identify general program/index pages that should lead to concrete tasks."""
+    lower = text.lower()
+    specific_task = re.search(
+        r"(?:^|\n)\s*(?:#{1,6}\s*)?(?:task|work item|deliverable)\s*[:–—-]"
+        r"|(?:^|\n)\s*(?:#{1,6}\s*)?\[(?:bounty|reward)\]\s+[^\n]+",
+        lower,
+    )
+    if specific_task and has_current_reward_evidence(text):
+        return False
+
+    general_range = re.search(
+        r"\breward ranges?\b|\bcategory\b[^\n|]{0,40}\breward\b"
+        r"|\b(?:small|medium|major) features?\b.{0,80}(?:\$|usd|eur|gbp|rmb|cny)\s*\d"
+        r"|(?:\$|usd|eur|gbp|rmb|cny)\s*\d[^\n]{0,30}\bfor (?:bug fixes|guides|documentation|features|vulnerabilities)\b",
+        lower,
+        re.DOTALL,
+    )
+    marketplace = re.search(
+        r"\b(?:bounty |task )?(?:marketplace|market|platform|community)\b.{0,180}"
+        r"\b(?:browse|find|list|post|discover|claim)\b.{0,80}\b(?:bount(?:y|ies)|tasks?|issues?)\b",
+        lower,
+        re.DOTALL,
+    )
+    program_signals = sum(
+        term in lower
+        for term in (
+            "bounty program",
+            "how to claim bounties",
+            "find issue tagged",
+            "current bounty tasks",
+            "active bounties",
+            "browse github issues",
+        )
+    )
+    return bool(general_range or marketplace or program_signals >= 2)
+
+
 def has_task_contributor_reward_link(text, reward_label=False):
     """Require evidence that the reward belongs to this contribution task."""
     lower = text.lower()
+    if has_explicit_no_current_reward(text):
+        return False
+    if has_generic_backing_template(text) and not has_current_reward_evidence(text, reward_label):
+        return False
+    if is_product_billing_only(text):
+        return False
     if re.search(
         r"\b(?:no|not offering|without)\s+(?:a\s+)?(?:cash\s+)?(?:bug\s+)?(?:bounty|reward|prize)\b"
         r"|\b(?:can't|cannot|can not|unable to)\s+offer\s+(?:any\s+)?(?:cash\s+)?(?:bounty|reward|prize)\b"
@@ -656,6 +822,12 @@ def is_non_cash_only_reward(text):
 def has_document_reward_assertion(context):
     """Require an actual offer, not merely words such as challenge or reward model."""
     lower = context.lower()
+    if has_explicit_no_current_reward(context):
+        return False
+    if has_generic_backing_template(context) and not has_current_reward_evidence(context):
+        return False
+    if is_product_billing_only(context):
+        return False
     if re.search(
         r"\b(?:no|not offering|without)\s+(?:a\s+)?(?:cash\s+)?(?:bug\s+)?(?:bounty|reward|prize)\b"
         r"|\b(?:can't|cannot|can not|unable to)\s+offer\s+(?:any\s+)?(?:cash\s+)?(?:bounty|reward|prize)\b"
@@ -750,6 +922,8 @@ def payment_context(text):
     selected = []
     for line in lines:
         lower = line.lower()
+        if is_product_billing_only(line):
+            continue
         if any(term in lower for term in STRONG_REWARD_TERMS + GENERIC_REWARD_TERMS) or re.search(
             r"\bpay(?:ment|out|pal|ing|able|ed)?\b|winner|receive|bank transfer|wire transfer"
             r"|usdc|usdt|tether|\bbtc\b|bitcoin|sats?|satoshi|lightning|\bxlm\b|\brtc\b|\beth\b|\bsol\b|\bdai\b"
@@ -1020,17 +1194,35 @@ def analyze_candidate(
     context = relevant_context(text)
     focused_text = "\n".join(part for part in (title, context) if part)
     lower = focused_text.lower()
+    full_lower = text.lower()
 
     def reject(reason):
         if rejection_reasons is not None:
             rejection_reasons.append(reason)
         return None
 
+    if has_explicit_no_current_reward(text):
+        return reject("no reward link")
+    if has_generic_backing_template(text) and not has_current_reward_evidence(text):
+        return reject("no reward link")
+    if is_historical_reward_summary(title, text):
+        return reject("historical reward")
+    if is_product_billing_only(text):
+        return reject("product billing")
+    if source == "Repository Markdown" and is_discovery_source_document(text):
+        return reject("discovery source")
     if any(term in lower for term in SPAM_TERMS + JOB_TERMS):
         return reject("spam/job")
-    if any(term in lower for term in LONG_PROJECT_TERMS):
+    if any(term in full_lower for term in LONG_PROJECT_TERMS):
         return reject("heavy scope")
-    full_lower = text.lower()
+    if re.search(
+        r"\b(?:3|4|5|6|three|four|five|six)\s*[-–—]\s*(?:3|4|5|6|three|four|five|six)\s+weeks?\b"
+        r"|\blarge[- ]scale empirical reproduction\b"
+        r"|\bempirically reproduce\b.{0,120}\b(?:across\s+)?(?:\d{2,}|dozens?|many)\b",
+        full_lower,
+        re.DOTALL,
+    ):
+        return reject("heavy scope")
     if sum(term in full_lower for term in HEAVY_SCOPE_TERMS) >= 2 and not any(
         term in full_lower for term in MICRO_TASK_TERMS
     ):
@@ -1180,6 +1372,8 @@ def has_issue_reward_offer(item):
     lower_body = body.lower()
     combined = lower_title + "\n" + lower_body
 
+    if has_explicit_no_current_reward(combined):
+        return False
     if re.search(
         r"\b(?:paused|cancelled|canceled|unfunded|not funded|not payable|ineligible)\b"
         r"|\bdoes not prove\b|\bdoes not claim\b|\bnot claim current\b",
@@ -1759,6 +1953,55 @@ def fetch_readme_fallback_documents(token=None):
     return documents
 
 
+def extract_discovery_task_urls(text, base_url, limit=5):
+    """Extract a few task-looking links from a program or marketplace page."""
+    links = []
+    for label, raw_target in re.findall(r"\[([^]\n]+)\]\(([^)\n]+)\)", text):
+        target = re.split(r"\s+[\"']", raw_target.strip(), maxsplit=1)[0].strip("<>")
+        if target.startswith("#"):
+            continue
+        hint = f"{label} {target}".lower()
+        if not any(term in hint for term in ("bounty", "reward", "paid", "task", "challenge", "issue")):
+            continue
+        url = urllib.parse.urldefrag(urllib.parse.urljoin(base_url, target))[0]
+        if url == urllib.parse.urldefrag(base_url)[0]:
+            continue
+        if url.startswith(("http://", "https://")) and url not in links:
+            links.append(url)
+    for url in re.findall(
+        r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/\d+",
+        text,
+        re.IGNORECASE,
+    ):
+        if url not in links:
+            links.append(url)
+    return links[:limit]
+
+
+def fetch_discovery_target(url, token=None):
+    issue = fetch_github_issue_url(url, token)
+    if issue:
+        project = str(issue.get("repository_url") or "").split("/repos/")[-1]
+        return {
+            "source": "GitHub Issue",
+            "title": str(issue.get("title") or "Untitled bounty"),
+            "project": project,
+            "url": str(issue.get("html_url") or url),
+            "text": "\n".join((str(issue.get("title") or ""), str(issue.get("body") or ""))),
+            "item": issue,
+        }
+    document = fetch_github_document_url(url, token)
+    if document:
+        document["source"] = "Repository Markdown"
+        return document
+    if urllib.parse.urlparse(url).netloc.lower() == "github.com":
+        return None
+    external = fetch_external_page_source(url)
+    if external:
+        external["source"] = "External bounty page"
+    return external
+
+
 def scan_documents(token=None):
     documents = []
     code_search_worked = False
@@ -1773,29 +2016,87 @@ def scan_documents(token=None):
 
     candidates = []
     diagnostic_samples = {}
-    for document in documents:
-        platform_rule = verified_platform_payment_rule(text=document["text"], url=document["url"])
+    queue = [{**document, "source": "Repository Markdown", "discovery_depth": 0} for document in documents]
+    seen_urls = {document["url"] for document in documents}
+    followed = 0
+    filtered = 0
+    for document in queue:
+        source = document.get("source", "Repository Markdown")
+        if source != "GitHub Issue" and is_discovery_source_document(document["text"]):
+            filtered += 1
+            add_diagnostic_sample(diagnostic_samples, "discovery source", document["url"])
+            if document.get("discovery_depth", 0) >= 2:
+                continue
+            for target_url in extract_discovery_task_urls(document["text"], document["url"]):
+                if followed >= MAX_DISCOVERY_TARGETS or target_url in seen_urls:
+                    continue
+                seen_urls.add(target_url)
+                target = fetch_discovery_target(target_url, token)
+                if not target:
+                    continue
+                target["discovered_via"] = document.get("discovered_via") or document["url"]
+                target["discovery_depth"] = document.get("discovery_depth", 0) + 1
+                queue.append(target)
+                followed += 1
+            continue
+
+        item = document.get("item") if source == "GitHub Issue" else None
+        if item:
+            safeguard_reason = issue_safeguard_reason(item)
+            if safeguard_reason:
+                filtered += 1
+                add_diagnostic_sample(diagnostic_samples, safeguard_reason, document["url"])
+                continue
+            if not has_issue_reward_offer(item):
+                filtered += 1
+                add_diagnostic_sample(diagnostic_samples, "no reward link", document["url"])
+                continue
+
+        labels = [
+            label.get("name")
+            for label in (item or {}).get("labels", [])
+            if isinstance(label, dict)
+        ]
+        platform_rule = verified_platform_payment_rule(
+            text=document["text"], labels=labels, url=document["url"]
+        )
         rejection_reasons = []
         candidate = analyze_candidate(
             title=document["title"],
             project=document["project"],
             url=document["url"],
-            source="Repository Markdown",
+            source="GitHub Issue" if item else "Repository Markdown",
             text=document["text"],
+            comments=(item or {}).get("comments"),
+            updated_at=(item or {}).get("updated_at"),
             platform_payment_rule=platform_rule,
+            reward_offer_confirmed=bool(item),
             rejection_reasons=rejection_reasons,
         )
-        if candidate:
-            candidates.append(candidate)
-        else:
+        if not candidate:
+            filtered += 1
             add_diagnostic_sample(
                 diagnostic_samples,
                 rejection_reasons[0] if rejection_reasons else "other",
                 document["url"],
             )
+            continue
+        if item:
+            pr_info = fetch_related_pr_info(item, token)
+            if pr_info["completed_by_merged_pr"]:
+                filtered += 1
+                add_diagnostic_sample(diagnostic_samples, "merged/completed", document["url"])
+                continue
+            apply_pr_competition(candidate, pr_info, document["text"], item=item)
+        if source == "External bounty page":
+            candidate["source"] = source
+            candidate["project_url"] = document.get("project_url")
+        if document.get("discovered_via"):
+            candidate["discovered_via"] = document["discovered_via"]
+        candidates.append(candidate)
     log(
         "Document scan summary (Actions log only): "
-        f"fetched={len(documents)}, analysis_filtered={len(documents) - len(candidates)}, matched={len(candidates)}"
+        f"fetched={len(documents)}, followed={followed}, analysis_filtered={filtered}, matched={len(candidates)}"
     )
     log_diagnostic_samples("Document", diagnostic_samples)
     return candidates

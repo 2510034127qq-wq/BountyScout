@@ -439,6 +439,183 @@ class TriageAndStateTests(unittest.TestCase):
             )
         )
 
+    def test_issue_5_hall_of_fame_total_is_historical_not_current_reward(self):
+        text = """
+        # Hall of Fame — September 2026
+        ## Top Contributors
+        Leaderboard and total earned by past winners.
+        ## Monthly Stats
+        Total Bounty Distributed: $4770
+        """
+        candidate = scout.analyze_candidate(
+            "🏆 Hall of Fame — September 2026",
+            "zhangjiayang6835-cyber/ai-research",
+            "https://github.com/zhangjiayang6835-cyber/ai-research/issues/1533",
+            "GitHub Issue",
+            text,
+            now=NOW,
+            reward_offer_confirmed=True,
+        )
+        self.assertIsNone(candidate)
+
+        current = scout.analyze_candidate(
+            "[BOUNTY] Fix leaderboard sorting",
+            "example/game",
+            "https://github.com/example/game/issues/4",
+            "GitHub Issue",
+            "Current reward: $40. Fix the leaderboard sorting bug and submit a pull request.",
+            now=NOW,
+        )
+        self.assertIsNotNone(current)
+
+    def test_issue_5_large_grant_and_other_explicit_heavy_scopes_are_filtered(self):
+        scopes = (
+            "Conduct a full security audit; the engagement typically runs 3–6 weeks.",
+            "Complete this multi-milestone implementation and final report.",
+            "This is a large empirical reproduction across 48 portfolio setups.",
+            "Take ownership of this long-running project.",
+        )
+        for index, scope in enumerate(scopes):
+            with self.subTest(scope=scope):
+                text = f"Requested bounty program budget: $90,000. {scope} Submit the deliverables."
+                self.assertIsNone(
+                    scout.analyze_candidate(
+                        "Grant Application - Security Audit of Zaino",
+                        "ZcashCommunityGrants/zcashcommunitygrants",
+                        f"https://github.com/ZcashCommunityGrants/zcashcommunitygrants/issues/{407 + index}",
+                        "GitHub Issue",
+                        text,
+                        now=NOW,
+                        reward_offer_confirmed=True,
+                    )
+                )
+
+    def test_issue_5_stripe_credit_pack_is_product_billing_not_payout(self):
+        text = """
+        Goal: implement a token/credit wallet for customer billing.
+        Store stripe_payment_id on customer purchases and decrement credits for every billable tool call.
+        Stripe credit packs: Starter $20, Growth $99. Add a recurring subscription tier.
+        Submit the implementation after the checkout test passes.
+        """
+        self.assertFalse(scout.has_issue_reward_offer({"title": "BidDeed billing system", "body": text}))
+        self.assertEqual(scout.extract_payment_methods(text), [])
+        self.assertIsNone(
+            scout.analyze_candidate(
+                "BidDeed.AI: Token/credit-based billing system",
+                "breverdbidder/cli-anything-biddeed",
+                "https://github.com/breverdbidder/cli-anything-biddeed/issues/19677",
+                "GitHub Issue",
+                text,
+                now=NOW,
+                reward_offer_confirmed=True,
+            )
+        )
+
+        real_bounty = "Bounty: $50. Fix one Stripe checkout bug; contributors are paid via Stripe after merge."
+        candidate = scout.analyze_candidate(
+            "[BOUNTY] Fix checkout callback",
+            "example/checkout",
+            "https://github.com/example/checkout/issues/1",
+            "GitHub Issue",
+            real_bounty,
+            now=NOW,
+        )
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["payment_method"], "Stripe")
+
+    def test_generic_backing_templates_need_current_funding_evidence(self):
+        templates = (
+            "Everyone can add rewards. Fix the parser and submit a PR.",
+            "Want to back this issue? Post a bounty on it! Fix the parser and submit a PR.",
+            "Sponsor this issue or fund this issue. Fix the parser and submit a PR.",
+        )
+        for text in templates:
+            with self.subTest(text=text):
+                item = {"title": "Parser bug", "body": text, "labels": []}
+                self.assertFalse(scout.has_issue_reward_offer(item))
+                self.assertIsNone(
+                    scout.analyze_candidate(
+                        item["title"],
+                        "example/parser",
+                        "https://github.com/example/parser/issues/2",
+                        "GitHub Issue",
+                        text,
+                        now=NOW,
+                        reward_offer_confirmed=True,
+                    )
+                )
+
+        funded = (
+            "Want to back this issue? Post a bounty on it. Current reward: $75. "
+            "Fix the parser and submit a pull request."
+        )
+        self.assertTrue(scout.has_issue_reward_offer({"title": "Parser bug", "body": funded, "labels": []}))
+        self.assertIsNotNone(
+            scout.analyze_candidate(
+                "Parser bug",
+                "example/parser",
+                "https://github.com/example/parser/issues/3",
+                "GitHub Issue",
+                funded,
+                now=NOW,
+            )
+        )
+
+    def test_explicit_no_reward_or_non_task_language_is_filtered(self):
+        negatives = (
+            "Production payouts are not live yet. When paid work launches, contributors may earn rewards.",
+            "This is a zero-bounty task with zero monetary reward. Submit a PR if interested.",
+            "This is not a build ticket; it only describes a possible future bounty.",
+            "This task is unfunded and has no reward yet. Implementing it is optional.",
+            "The bounty bot says this issue does not have any reward yet.",
+        )
+        for index, text in enumerate(negatives):
+            with self.subTest(text=text):
+                self.assertFalse(scout.has_issue_reward_offer({"title": "Task", "body": text, "labels": []}))
+                self.assertIsNone(
+                    scout.analyze_candidate(
+                        "Task",
+                        "example/project",
+                        f"https://github.com/example/project/issues/{10 + index}",
+                        "GitHub Issue",
+                        text,
+                        now=NOW,
+                        reward_offer_confirmed=True,
+                    )
+                )
+
+    def test_nofx_reward_ranges_are_discovery_source_not_task_reward(self):
+        text = """
+        # NOFX Community
+        ## Bounty Program
+        ### Active Bounties
+        | Category | Reward Range | Examples |
+        | Small Features | $50-200 | Bug fixes, UI improvements, documentation |
+        | Medium Features | $200-500 | WebSocket support, new AI models |
+        ### How to Claim Bounties
+        1. Find issue tagged `[BOUNTY]`
+        2. Submit PR with demo
+        3. Get paid after merge
+        ### Current Bounty Tasks
+        | [Hyperliquid Integration](bounty-hyperliquid.md) | TBD | Open |
+        """
+        url = "https://github.com/BigBanana-7788/nofx/blob/main/docs/community/README.md"
+        self.assertTrue(scout.is_discovery_source_document(text))
+        self.assertIsNone(
+            scout.analyze_candidate(
+                "BigBanana-7788/nofx — docs/community/README.md",
+                "BigBanana-7788/nofx",
+                url,
+                "Repository Markdown",
+                text,
+                now=NOW,
+            )
+        )
+        self.assertEqual(
+            scout.extract_discovery_task_urls(text, url),
+            ["https://github.com/BigBanana-7788/nofx/blob/main/docs/community/bounty-hyperliquid.md"],
+        )
+
     def test_rejects_crypto_only_payments(self):
         assets = ("USDC", "USDT", "BTC", "sats", "Lightning", "ETH", "SOL", "XLM", "DAI", "RTC")
         for asset in assets:
@@ -836,6 +1013,37 @@ class TriageAndStateTests(unittest.TestCase):
         }
         with mock.patch.object(scout, "fetch_readme_fallback_documents", return_value=[document]):
             self.assertEqual(scout.scan_documents(), [])
+
+    def test_document_scan_follows_discovery_page_to_concrete_task(self):
+        discovery = {
+            "title": "example/project — COMMUNITY.md",
+            "project": "example/project",
+            "url": "https://github.com/example/project/blob/main/COMMUNITY.md",
+            "text": """
+            Bounty Program. Reward Range: $50-200 for bug fixes.
+            How to claim bounties: find an issue tagged [BOUNTY].
+            Current bounty tasks: [BOUNTY Parser fix](bounty-parser.md).
+            """,
+        }
+        target = {
+            "source": "Repository Markdown",
+            "title": "example/project — bounty-parser.md",
+            "project": "example/project",
+            "url": "https://github.com/example/project/blob/main/bounty-parser.md",
+            "text": "Bounty: $75. Fix one parser edge case and submit a pull request.",
+        }
+        with mock.patch.object(
+            scout, "fetch_readme_fallback_documents", return_value=[discovery]
+        ), mock.patch.object(scout, "fetch_discovery_target", return_value=target) as fetch_target:
+            candidates = scout.scan_documents()
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["url"], target["url"])
+        self.assertEqual(candidates[0]["reward"], "$75")
+        self.assertEqual(candidates[0]["discovered_via"], discovery["url"])
+        fetch_target.assert_called_once_with(
+            "https://github.com/example/project/blob/main/bounty-parser.md", None
+        )
 
     def test_scan_statistics_are_logged(self):
         with mock.patch.object(scout, "search_endpoint", return_value={"items": []}), mock.patch.object(

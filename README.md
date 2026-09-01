@@ -23,9 +23,11 @@ BountyScout 是一个无第三方依赖的 GitHub 扫描器，用来发现几十
 
 没有令牌时，脚本自动降级为 GitHub Repository Search：先查匹配的 README，再优先检查仓库中名称带 `challenge`、`bounty`、`reward`、`prize`、`contribut`、`governance`、`program`、`payment` 或 `compensation` 的少量 Markdown。这个模式能运行，但覆盖率低于认证后的 Code Search；文件名始终不是最终硬过滤条件。
 
+README、Bounty Program、marketplace/community 页面如果只给出奖励类别范围或任务入口，会保留为 discovery source，但不会直接成为通知候选。扫描器会有限跟进其中名称或链接带 `bounty`、`reward`、`task`、`challenge`、`issue` 的具体页面，再从具体任务页重新确认当前奖励；例如 `$50-200` 的类别范围不会自动成为某个 TBD 任务的奖金。
+
 ## 筛选和结果字段
 
-候选优先按“明确奖励 + 小任务信号 + 编码任务信号 + 提交方式完整度”排序。`payout`、`compensation`、`paid after merge`、`paid upon acceptance`、`payment after accepted PR` 等表达也能建立贡献与报酬的关系。游戏币/游戏内 reward、商品价格、业务金额、成本、账户余额和教程示例金额不会仅因出现 `reward`、`payment` 或货币符号而进入候选。奖金金额不作为任务规模过滤条件；大型 Hackathon、招聘/实习岗位、`bounty-large`、明确的长期/重型实现、过期活动、已暂停任务和常见垃圾内容仍会根据任务范围被排除。镜像 Issue 会恢复并去重到最终原始页面，其余不确定候选会保留，避免隐藏悬赏被过度过滤。扫描器还会读取原始 Issue 的 GitHub 时间线：assignee、claimed/in progress、高评论数和相关 open PR 只记录为竞争并降低排序，first merged/accepted/valid wins 规则下 open PR 权重更高；只有明确独占认领规则、Issue 明确完成，或已合并 PR 明确使用 `Closes`、`Fixes` 或 `Resolves` 完成该 Issue 时才过滤。每类主要过滤原因最多 7 个样本 URL、原始命中和去重数量只记录在 Actions 日志中，提醒 Issue 始终只包含最终候选结果。
+候选优先按“明确奖励 + 小任务信号 + 编码任务信号 + 提交方式完整度”排序。`payout`、`compensation`、`paid after merge`、`paid upon acceptance`、`payment after accepted PR` 等表达也能建立贡献与报酬的关系；但 `Post a bounty`、`Want to back this issue?` 等通用模板必须再有当前金额、funded 状态或 bot 确认才能成立。Hall of Fame、leaderboard、历史 payout/earned 统计，以及 Stripe checkout、subscription、credit pack、API/customer billing 等产品收费不会当作贡献者奖励或付款方式。游戏币/游戏内 reward、商品价格、业务金额、成本、账户余额和教程示例金额也不会仅因出现 `reward`、`payment` 或货币符号而进入候选。奖金金额不作为任务规模过滤条件；大型 Hackathon、招聘/实习岗位、`bounty-large`、3–6 周、multi-milestone、完整安全审计、大型实证复现、long-running project、过期活动、已暂停或明确 unfunded/no reward 的任务仍会根据任务范围或资金状态排除。扫描器还会读取原始 Issue 的 GitHub 时间线：assignee、claimed/in progress、高评论数和相关 open PR 只记录为竞争并降低排序，first merged/accepted/valid wins 规则下 open PR 权重更高；只有明确独占认领规则、Issue 明确完成，或已合并 PR 明确使用 `Closes`、`Fixes` 或 `Resolves` 完成该 Issue 时才过滤。每类主要过滤原因最多 7 个样本 URL、原始命中和去重数量只记录在 Actions 日志中，提醒 Issue 始终只包含最终候选结果。
 
 每条通知尽量给出：
 
