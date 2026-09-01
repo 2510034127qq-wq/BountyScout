@@ -38,6 +38,11 @@ ISSUE_SEARCH_QUERIES = [
     'is:issue is:open "paid contribution" in:title,body sort:updated-desc',
     'is:issue is:open "paid PR" in:title,body sort:updated-desc',
     'is:issue is:open "contributor reward" in:title,body sort:updated-desc',
+    'is:issue is:open "paid task" in:title,body sort:updated-desc',
+    'is:issue is:open "cash reward" in:title,body sort:updated-desc',
+    "is:issue is:open payment in:title,body sort:updated-desc",
+    "is:issue is:open payout in:title,body sort:updated-desc",
+    "is:issue is:open reward in:title,body sort:updated-desc",
 ]
 
 # Code search covers README, CONTRIBUTING and standalone challenge documents.
@@ -75,10 +80,11 @@ STRONG_REWARD_TERMS = (
     "paid bounty",
     "paid issue",
     "paid pr",
+    "paid task",
     "monetary reward",
     "bounty",
 )
-GENERIC_REWARD_TERMS = ("reward", "prize", "payout", "compensation")
+GENERIC_REWARD_TERMS = ("reward", "prize", "payment", "payout", "compensation")
 REWARD_INTENT_TERMS = ("bounty", "reward", "prize", "payout", "cash", "paid", "compensation", "winner")
 MICRO_TASK_TERMS = (
     "good first issue",
@@ -407,6 +413,7 @@ def has_document_reward_assertion(context):
         "paid bounty",
         "paid issue",
         "paid pr",
+        "paid task",
         "monetary reward",
         "contributor reward",
         "prize pool",
@@ -480,17 +487,6 @@ def has_actionable_document_offer(context, submission):
 
 def document_path_from_title(title):
     return title.split(" — ", 1)[-1].strip()
-
-
-def major_currency_prize_is_large(amounts):
-    """Identify prizes outside the intended tens-to-hundreds range."""
-    for amount in amounts:
-        if not re.search(r"(?:US\$|USD|EUR|GBP|€|£|\$)", amount, re.IGNORECASE):
-            continue
-        number = re.search(r"\d[\d,]*(?:\.\d+)?", amount)
-        if number and float(number.group(0).replace(",", "")) >= 2000:
-            return True
-    return False
 
 
 def payment_context(text):
@@ -753,9 +749,6 @@ def analyze_candidate(title, project, url, source, text, comments=None, updated_
     large_event = any(term in lower for term in ("hackathon", "game jam", "multi-day competition"))
     if large_event and not micro_hit:
         return None
-    if source == "Repository Markdown" and major_currency_prize_is_large(amounts) and not micro_hit:
-        return None
-
     if source == "Repository Markdown":
         path = document_path_from_title(title)
         named_path = " — " not in title or candidate_markdown_path(path)
@@ -855,7 +848,7 @@ def has_issue_reward_offer(item):
         return True
 
     explicit_title = re.search(
-        r"(?:^|[\[(:-])\s*(?:micro\s+)?bounty\b|\b(?:cash prize|paid challenge|paid contribution|contributor reward)\b",
+        r"(?:^|[\[(:-])\s*(?:micro\s+)?bounty\b|\b(?:cash prize|cash reward|paid task|paid challenge|paid contribution|contributor reward)\b",
         lower_title,
     )
     title_amount = any(re.search(pattern, title, re.IGNORECASE) for pattern in AMOUNT_PATTERNS)

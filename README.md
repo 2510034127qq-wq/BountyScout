@@ -8,7 +8,7 @@ BountyScout 是一个无第三方依赖的 GitHub 扫描器，用来发现几十
 
 ### GitHub Issues
 
-扫描开放 Issue 中的 `bounty`、`cash prize`、`paid challenge`、`paid contribution`、`paid PR` 和 `contributor reward` 等表达。原有规则仍然有效：跳过 PR、已有负责人、超过 25 条评论的拥挤任务、广告/博彩/内容写作等噪声。
+扫描开放 Issue 中的 `bounty`、`paid task`、`cash prize`、`cash reward`、`payment`、`payout`、`reward`、`paid challenge`、`paid contribution`、`paid PR` 和 `contributor reward` 等表达。原有规则仍然有效：跳过 PR、已有负责人、超过 25 条评论的拥挤任务、广告/博彩/内容写作等噪声。
 
 标记为 radar、aggregator 或 external mirror 的 Issue 只作为发现入口。扫描器最多沿明确的来源链接跟进 3 跳，优先读取原始 GitHub Issue，也支持原始 Markdown 和可直接访问的公开活动页面；只有解析出实际任务后才进入结果。项目名、任务正文、奖励、付款方式、评论数和原始链接均来自最终页面，无法解析来源的 radar 通知不会上报。
 
@@ -24,7 +24,7 @@ BountyScout 是一个无第三方依赖的 GitHub 扫描器，用来发现几十
 
 ## 筛选和结果字段
 
-候选优先按“明确奖励 + 小任务信号 + 编码任务信号 + 提交方式完整度”排序。大型 Hackathon、招聘/实习岗位、`bounty-large`、明确的长期/重型实现、过期活动、已暂停任务和常见垃圾内容会被排除；镜像 Issue 会恢复并去重到最终原始页面。其余不确定候选会保留，避免隐藏悬赏被过度过滤。
+候选优先按“明确奖励 + 小任务信号 + 编码任务信号 + 提交方式完整度”排序。奖金金额不作为任务规模过滤条件；大型 Hackathon、招聘/实习岗位、`bounty-large`、明确的长期/重型实现、过期活动、已暂停任务和常见垃圾内容仍会根据任务范围被排除。镜像 Issue 会恢复并去重到最终原始页面，其余不确定候选会保留，避免隐藏悬赏被过度过滤。
 
 每条通知尽量给出：
 

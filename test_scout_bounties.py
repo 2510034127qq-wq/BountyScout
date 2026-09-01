@@ -125,13 +125,25 @@ class CandidateAnalysisTests(unittest.TestCase):
         )
         self.assertIsNone(candidate)
 
-    def test_large_competition_prize_is_not_a_micro_bounty(self):
+    def test_keeps_high_reward_when_task_scope_is_small(self):
         candidate = scout.analyze_candidate(
             "example/contest — CHALLENGE.md",
             "example/contest",
             "https://github.com/example/contest/blob/main/CHALLENGE.md",
             "Repository Markdown",
-            "Cash prize: $100,000. Build a full product and submit it to the competition.",
+            "Cash reward: $100,000. Fix one parser edge case and submit a pull request.",
+            now=NOW,
+        )
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["reward"], "$100,000")
+
+    def test_large_scope_is_rejected_independently_of_reward(self):
+        candidate = scout.analyze_candidate(
+            "example/contest — CHALLENGE.md",
+            "example/contest",
+            "https://github.com/example/contest/blob/main/CHALLENGE.md",
+            "Repository Markdown",
+            "Cash prize: $100. This is a multi-month architecture redesign; submit the completed product.",
             now=NOW,
         )
         self.assertIsNone(candidate)
@@ -168,6 +180,16 @@ class CandidateAnalysisTests(unittest.TestCase):
 
 
 class TriageAndStateTests(unittest.TestCase):
+    def test_issue_search_queries_cover_common_payment_terms(self):
+        expected = {
+            'is:issue is:open "paid task" in:title,body sort:updated-desc',
+            'is:issue is:open "cash reward" in:title,body sort:updated-desc',
+            "is:issue is:open payment in:title,body sort:updated-desc",
+            "is:issue is:open payout in:title,body sort:updated-desc",
+            "is:issue is:open reward in:title,body sort:updated-desc",
+        }
+        self.assertTrue(expected.issubset(set(scout.ISSUE_SEARCH_QUERIES)))
+
     def test_issue_safeguards(self):
         base = {
             "comments": 2,
