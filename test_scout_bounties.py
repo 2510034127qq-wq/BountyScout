@@ -463,8 +463,9 @@ class TriageAndStateTests(unittest.TestCase):
         )
         self.assertIsNone(candidate)
 
-        virtual_only = scout.analyze_candidate(
-            "🏆 Hall of Fame — September 2026",
+        virtual_footer_reasons = []
+        virtual_footer = scout.analyze_candidate(
+            "Monthly contributor stats",
             "zhangjiayang6835-cyber/ai-research",
             "https://github.com/zhangjiayang6835-cyber/ai-research/issues/1533",
             "GitHub Issue",
@@ -474,8 +475,24 @@ class TriageAndStateTests(unittest.TestCase):
             """,
             now=NOW,
             reward_offer_confirmed=True,
+            rejection_reasons=virtual_footer_reasons,
         )
-        self.assertIsNone(virtual_only)
+        self.assertIsNone(virtual_footer)
+        self.assertEqual(virtual_footer_reasons, ["no reward link"])
+
+        english_virtual_reasons = []
+        english_virtual = scout.analyze_candidate(
+            "Contributor payout summary",
+            "example/stats",
+            "https://github.com/example/stats/issues/1",
+            "GitHub Issue",
+            "Virtual tokens for ranking only; cannot be redeemed for cash or cryptocurrency.",
+            now=NOW,
+            reward_offer_confirmed=True,
+            rejection_reasons=english_virtual_reasons,
+        )
+        self.assertIsNone(english_virtual)
+        self.assertEqual(english_virtual_reasons, ["no reward link"])
 
         current = scout.analyze_candidate(
             "[BOUNTY] Fix leaderboard sorting",

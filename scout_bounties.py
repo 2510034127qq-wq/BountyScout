@@ -713,7 +713,7 @@ def has_explicit_no_current_reward(text):
             r"|\b(?:this|the) (?:issue|task) is unfunded\b|\bunfunded\b|\bnot funded\b"
             r"|\bnot a build ticket\b"
             r"|\b(?:bounty|reward)\s*[:=]\s*(?:\$?0(?:\.0+)?|none)\b"
-            r"|\bvirtual (?:tokens?|currency)\b[^.\n]{0,80}\b(?:not|cannot|can't)\b[^.\n]{0,40}\b(?:exchange|redeem|convert)\b"
+            r"|\bvirtual (?:tokens?|currency)\b[^.\n]{0,80}\b(?:not|cannot|can't)\b[^.\n]{0,40}\b(?:exchange|redeem(?:ed)?|convert)\b"
             r"|虚拟代币[^.\n]{0,40}(?:不可兑换|不能兑换|仅供学习)",
             text,
             re.IGNORECASE,
