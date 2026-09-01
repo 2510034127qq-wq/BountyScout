@@ -463,6 +463,20 @@ class TriageAndStateTests(unittest.TestCase):
         )
         self.assertIsNone(candidate)
 
+        virtual_only = scout.analyze_candidate(
+            "🏆 Hall of Fame — September 2026",
+            "zhangjiayang6835-cyber/ai-research",
+            "https://github.com/zhangjiayang6835-cyber/ai-research/issues/1533",
+            "GitHub Issue",
+            """
+            Total Bounty Distributed: $4770
+            虚拟代币仅供学习排名使用，不可兑换为现金或加密货币。
+            """,
+            now=NOW,
+            reward_offer_confirmed=True,
+        )
+        self.assertIsNone(virtual_only)
+
         current = scout.analyze_candidate(
             "[BOUNTY] Fix leaderboard sorting",
             "example/game",
