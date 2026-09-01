@@ -316,7 +316,12 @@ class TriageAndStateTests(unittest.TestCase):
         )
         self.assertIsNone(candidate)
 
-    def test_reward_platform_without_payout_channel_stays_unknown(self):
+    def test_verified_grantfox_rule_filters_crypto_only_payment(self):
+        rule = scout.verified_platform_payment_rule(
+            text="GrantFox reward consideration applies after review.",
+            labels=["GrantFox OSS", "Maybe Rewarded"],
+        )
+        self.assertEqual(rule["name"], "GrantFox")
         candidate = scout.analyze_candidate(
             "[BOUNTY] Small parser fix",
             "example/parser",
@@ -324,9 +329,44 @@ class TriageAndStateTests(unittest.TestCase):
             "GitHub Issue",
             "Bounty: $50. Fix one parser edge case. GrantFox reward consideration applies after review.",
             now=NOW,
+            platform_payment_rule=rule,
+        )
+        self.assertIsNone(candidate)
+
+    def test_unverified_platform_without_payout_channel_stays_unknown(self):
+        text = "Bounty: $50. Fix one parser edge case. ExampleFox reward consideration applies after review."
+        rule = scout.verified_platform_payment_rule(text=text, labels=["ExampleFox OSS"])
+        self.assertIsNone(rule)
+        candidate = scout.analyze_candidate(
+            "[BOUNTY] Small parser fix",
+            "example/parser",
+            "https://github.com/example/parser/issues/1",
+            "GitHub Issue",
+            text,
+            now=NOW,
+            platform_payment_rule=rule,
         )
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate["payment_method"], "待确认")
+
+    def test_explicit_fiat_option_overrides_platform_crypto_only_rule(self):
+        rule = scout.verified_platform_payment_rule(labels=["GrantFox OSS"])
+        candidate = scout.analyze_candidate(
+            "[BOUNTY] Small parser fix",
+            "example/parser",
+            "https://github.com/example/parser/issues/1",
+            "GitHub Issue",
+            "Bounty: $50. Fix one parser edge case. Payout via PayPal or USDC.",
+            now=NOW,
+            platform_payment_rule=rule,
+        )
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["payment_method"], "PayPal、USDC")
+        self.assertEqual(candidate["payment_rule_source"], rule["evidence_url"])
+
+    def test_verified_platform_can_be_identified_from_official_host(self):
+        rule = scout.verified_platform_payment_rule(url="https://contribute.grantfox.xyz/issues/123")
+        self.assertEqual(rule["name"], "GrantFox")
 
     def test_expired_day_first_deadline_is_rejected(self):
         candidate = scout.analyze_candidate(
@@ -418,6 +458,128 @@ class TriageAndStateTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 1)
         sleep.assert_not_called()
 
+    def test_related_prs_count_open_and_ignore_closed_unmerged(self):
+        item = {
+            "number": 476,
+            "html_url": "https://github.com/connect-boiz/soroban-security-scanner/issues/476",
+            "repository_url": "https://api.github.com/repos/connect-boiz/soroban-security-scanner",
+            "timeline_url": "https://api.github.com/repos/connect-boiz/soroban-security-scanner/issues/476/timeline",
+        }
+        events = [
+            {
+                "event": "cross-referenced",
+                "source": {
+                    "issue": {
+                        "number": 505,
+                        "state": "closed",
+                        "html_url": "https://github.com/connect-boiz/soroban-security-scanner/pull/505",
+                        "body": "Addresses #476",
+                        "pull_request": {"merged_at": None},
+                    }
+                },
+            },
+            {
+                "event": "cross-referenced",
+                "source": {
+                    "issue": {
+                        "number": 533,
+                        "state": "open",
+                        "html_url": "https://github.com/connect-boiz/soroban-security-scanner/pull/533",
+                        "body": "Closes #476",
+                        "pull_request": {"merged_at": None},
+                    }
+                },
+            },
+        ]
+        with mock.patch.object(scout, "github_api_get", return_value=events):
+            info = scout.fetch_related_pr_info(item, "token")
+
+        self.assertEqual(info["open_pr_count"], 1)
+        self.assertEqual(info["merged_pr_count"], 0)
+        self.assertFalse(info["completed_by_merged_pr"])
+
+    def test_merged_pr_only_completes_issue_with_explicit_closing_reference(self):
+        item = {
+            "number": 42,
+            "html_url": "https://github.com/example/parser/issues/42",
+            "repository_url": "https://api.github.com/repos/example/parser",
+        }
+        merged = {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "state": "closed",
+                    "html_url": "https://github.com/example/parser/pull/9",
+                    "body": "## Fixes #42\n\nImplements the requested parser correction.",
+                    "pull_request": {"merged_at": "2026-09-01T01:00:00Z"},
+                }
+            },
+        }
+        with mock.patch.object(scout, "github_api_get", return_value=[merged]):
+            info = scout.fetch_related_pr_info(item, "token")
+        self.assertEqual(info["merged_pr_count"], 1)
+        self.assertTrue(info["completed_by_merged_pr"])
+
+        merged["source"]["issue"]["body"] = "Related work for #42; does not complete the task."
+        with mock.patch.object(scout, "github_api_get", return_value=[merged]):
+            info = scout.fetch_related_pr_info(item, "token")
+        self.assertFalse(info["completed_by_merged_pr"])
+
+    def test_open_prs_lower_rank_more_under_first_wins_rule(self):
+        pr_info = {"open_pr_count": 2, "merged_pr_count": 0, "completed_by_merged_pr": False}
+        normal = scout.apply_pr_competition({"score": 10}, pr_info, "Open submissions are reviewed.")
+        first_wins = scout.apply_pr_competition(
+            {"score": 10}, pr_info, "The first valid submission wins the bounty."
+        )
+
+        self.assertEqual(normal["open_pr_count"], 2)
+        self.assertEqual(normal["score"], 8)
+        self.assertEqual(first_wins["score"], 4)
+        self.assertTrue(first_wins["first_wins"])
+
+    def test_soroban_476_is_competitive_but_filtered_by_grantfox_payment(self):
+        item = {
+            "number": 476,
+            "html_url": "https://github.com/connect-boiz/soroban-security-scanner/issues/476",
+            "repository_url": "https://api.github.com/repos/connect-boiz/soroban-security-scanner",
+            "title": "Critical: bounty pool has no real token custody",
+            "body": "Reward: $1,000. Implement real token custody and submit a pull request.",
+            "labels": [{"name": "GrantFox OSS"}, {"name": "Maybe Rewarded"}],
+        }
+        open_pr = {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "number": 533,
+                    "state": "open",
+                    "html_url": "https://github.com/connect-boiz/soroban-security-scanner/pull/533",
+                    "body": "Closes #476",
+                    "pull_request": {"merged_at": None},
+                }
+            },
+        }
+        with mock.patch.object(scout, "github_api_get", return_value=[open_pr]):
+            pr_info = scout.fetch_related_pr_info(item, "token")
+        self.assertEqual(pr_info["open_pr_count"], 1)
+        self.assertFalse(pr_info["completed_by_merged_pr"])
+
+        text = "\n".join((item["title"], item["body"]))
+        rule = scout.verified_platform_payment_rule(
+            text=text,
+            labels=[label["name"] for label in item["labels"]],
+            url=item["html_url"],
+        )
+        candidate = scout.analyze_candidate(
+            item["title"],
+            "connect-boiz/soroban-security-scanner",
+            item["html_url"],
+            "GitHub Issue",
+            text,
+            now=NOW,
+            platform_payment_rule=rule,
+        )
+        self.assertIsNone(candidate)
+
     def test_code_search_queries_are_spaced(self):
         queries = [("first", "first query"), ("second", "second query")]
         with mock.patch.object(scout, "DOCUMENT_SEARCH_QUERIES", queries), mock.patch.object(
@@ -430,6 +592,16 @@ class TriageAndStateTests(unittest.TestCase):
         sleep.assert_called_once_with(scout.CODE_SEARCH_INTERVAL_SECONDS)
         self.assertEqual(search.call_count, 2)
 
+    def test_document_scan_applies_verified_platform_payment_rule(self):
+        document = {
+            "title": "GrantFox bounty",
+            "project": "grantfox.xyz",
+            "url": "https://contribute.grantfox.xyz/issues/123",
+            "text": "Cash reward: $50. Fix one parser edge case and submit a pull request.",
+        }
+        with mock.patch.object(scout, "fetch_readme_fallback_documents", return_value=[document]):
+            self.assertEqual(scout.scan_documents(), [])
+
     def test_scan_statistics_are_logged(self):
         with mock.patch.object(scout, "search_endpoint", return_value={"items": []}), mock.patch.object(
             scout, "log"
@@ -440,6 +612,66 @@ class TriageAndStateTests(unittest.TestCase):
         self.assertIn("Issue scan summary", summary)
         self.assertIn("raw=0", summary)
         self.assertIn("matched=0", summary)
+
+    def test_scan_keeps_issue_with_open_pr_and_records_competition(self):
+        issue = {
+            "number": 42,
+            "html_url": "https://github.com/example/parser/issues/42",
+            "repository_url": "https://api.github.com/repos/example/parser",
+            "title": "[BOUNTY] Fix one parser edge case",
+            "body": "Bounty: $50. Fix the parser and submit a Pull Request. Payout via PayPal.",
+            "labels": [{"name": "bounty"}],
+            "assignees": [],
+            "comments": 1,
+            "state": "open",
+        }
+        open_pr = {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "state": "open",
+                    "html_url": "https://github.com/example/parser/pull/7",
+                    "body": "Closes #42",
+                    "pull_request": {"merged_at": None},
+                }
+            },
+        }
+        with mock.patch.object(scout, "search_endpoint", return_value={"items": [issue]}), mock.patch.object(
+            scout, "github_api_get", return_value=[open_pr]
+        ):
+            candidates = scout.scan_issues("token")
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["open_pr_count"], 1)
+        self.assertIn("有竞争", candidates[0]["competition"])
+
+    def test_scan_filters_issue_completed_by_merged_pr(self):
+        issue = {
+            "number": 42,
+            "html_url": "https://github.com/example/parser/issues/42",
+            "repository_url": "https://api.github.com/repos/example/parser",
+            "title": "[BOUNTY] Fix one parser edge case",
+            "body": "Bounty: $50. Fix the parser and submit a Pull Request. Payout via PayPal.",
+            "labels": [{"name": "bounty"}],
+            "assignees": [],
+            "comments": 1,
+            "state": "open",
+        }
+        merged_pr = {
+            "event": "cross-referenced",
+            "source": {
+                "issue": {
+                    "state": "closed",
+                    "html_url": "https://github.com/example/parser/pull/7",
+                    "body": "Closes #42",
+                    "pull_request": {"merged_at": "2026-09-01T01:00:00Z"},
+                }
+            },
+        }
+        with mock.patch.object(scout, "search_endpoint", return_value={"items": [issue]}), mock.patch.object(
+            scout, "github_api_get", return_value=[merged_pr]
+        ):
+            self.assertEqual(scout.scan_issues("token"), [])
 
     def test_deduplication_keeps_higher_score(self):
         low = {"url": "https://same", "score": 2, "updated_at": None}
@@ -580,17 +812,21 @@ class FormattingTests(unittest.TestCase):
             "effort": "推测：数小时",
             "comments": 3,
             "discovered_via": "https://github.com/radar/alerts/issues/1",
+            "open_pr_count": 1,
+            "competition": "有竞争：1 个相关 open PR",
         }
         message = scout.format_plain_notification([candidate] * 10, "2026-09-01 00:00 UTC", limit=700)
         self.assertLessEqual(len(message), 700)
         self.assertIn("Payment: 待确认", message)
         self.assertIn("Coding Agent: 是", message)
         self.assertIn("Original comments: 3", message)
+        self.assertIn("Related open PRs: 1", message)
         self.assertIn("Discovered via:", message)
         self.assertIn("…and", message)
 
         issue_body = scout.format_github_issue_body([candidate], "2026-09-01 00:00 UTC")
         self.assertIn("Tiny parser fix", issue_body)
+        self.assertIn("**Related open PRs:** 1", issue_body)
         self.assertNotIn("Issue scan summary", issue_body)
         self.assertNotIn("analysis_filtered=", issue_body)
 

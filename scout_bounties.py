@@ -236,8 +236,30 @@ PAYMENT_METHOD_PATTERNS = (
 
 FIAT_PAYMENT_METHODS = {"PayPal", "Wise", "Stripe", "银行转账", "支付宝", "微信支付"}
 CRYPTO_PAYMENT_METHODS = {"USDC", "USDT", "DAI", "BTC", "sats", "XLM", "RTC", "ETH", "SOL", "链上钱包"}
+
+# Platform payout rules are applied only when an official source explicitly
+# documents the payout rail. Platform names that are not listed here remain
+# unknown instead of being guessed from their branding or ecosystem.
+VERIFIED_PLATFORM_PAYMENT_RULES = (
+    {
+        "name": "GrantFox",
+        "issue_labels": {"grantfox oss"},
+        "source_hosts": {"grantfox.xyz", "docs.grantfox.xyz", "contribute.grantfox.xyz"},
+        "text_patterns": (r"\bgrantfox\s+(?:oss|campaign|reward|rewards)\b",),
+        "methods": ("USDC",),
+        "crypto_only": True,
+        "evidence_url": "https://docs.grantfox.xyz/core-info/what-is-grantfox",
+    },
+)
+
 RADAR_LABEL_HINTS = {"radar", "aggregator", "external-mirror", "bounty-hunter", "mirror"}
 MAX_SOURCE_HOPS = 3
+
+FIRST_WIN_PATTERNS = (
+    r"\bfirst\s+(?:merged|accepted|valid)(?:\s+(?:pr|pull request|submission|solution))?(?:\s+wins?)?\b",
+    r"\bfirst\s+(?:pr|pull request|submission|solution)\s+(?:merged|accepted|valid)\s+wins?\b",
+    r"\bfirst\s+(?:to be\s+)?(?:merged|accepted)\s+(?:wins?|gets? paid|is rewarded)\b",
+)
 
 AMOUNT_PATTERNS = (
     r"(?:US\$|USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|RTC|ETH|SOL|USDT|DAI|BTC|€|£|¥|₹|\$)\s*"
@@ -611,6 +633,30 @@ def is_crypto_only_payment(methods, text=""):
     return bool(re.search(chain_payout, text, re.IGNORECASE))
 
 
+def verified_platform_payment_rule(text="", labels=(), url=""):
+    """Return a documented platform payout rule only after a positive match."""
+    normalized_labels = {str(label).strip().lower() for label in labels if label}
+    haystack = "\n".join((str(text or ""), str(url or "")))
+    hostname = (urllib.parse.urlparse(str(url or "")).hostname or "").lower()
+    for rule in VERIFIED_PLATFORM_PAYMENT_RULES:
+        if normalized_labels & set(rule.get("issue_labels", ())):
+            return rule
+        if hostname in set(rule.get("source_hosts", ())):
+            return rule
+        if any(re.search(pattern, haystack, re.IGNORECASE) for pattern in rule.get("text_patterns", ())):
+            return rule
+    return None
+
+
+def merge_payment_methods(explicit_methods, platform_rule=None):
+    methods = list(explicit_methods)
+    if platform_rule:
+        for method in platform_rule.get("methods", ()):
+            if method not in methods:
+                methods.append(method)
+    return methods
+
+
 def first_matching_line(text, patterns, max_length=280):
     for raw_line in text.splitlines():
         line = clean_line(raw_line)
@@ -787,7 +833,17 @@ def estimate_effort(text):
     return "待确认"
 
 
-def analyze_candidate(title, project, url, source, text, comments=None, updated_at=None, now=None):
+def analyze_candidate(
+    title,
+    project,
+    url,
+    source,
+    text,
+    comments=None,
+    updated_at=None,
+    now=None,
+    platform_payment_rule=None,
+):
     """Normalize and score an Issue or Markdown document candidate."""
     context = relevant_context(text)
     focused_text = "\n".join(part for part in (title, context) if part)
@@ -808,7 +864,7 @@ def analyze_candidate(title, project, url, source, text, comments=None, updated_
         return None
 
     amounts = extract_reward_amounts(context)
-    methods = extract_payment_methods(text)
+    methods = merge_payment_methods(extract_payment_methods(text), platform_payment_rule)
     if is_crypto_only_payment(methods, text):
         return None
     strong_hit = any(term in lower for term in STRONG_REWARD_TERMS)
@@ -868,6 +924,9 @@ def analyze_candidate(title, project, url, source, text, comments=None, updated_
         "deadline": deadline,
         "submission": submission,
         "payment_method": "、".join(methods) if methods else "待确认",
+        "payment_rule_source": (
+            platform_payment_rule.get("evidence_url") if platform_payment_rule else None
+        ),
         "agent_fit": estimate_agent_fit(focused_text),
         "effort": estimate_effort(focused_text),
         "comments": comments,
@@ -1001,6 +1060,105 @@ def fetch_github_issue_url(url, token=None):
     if not isinstance(payload, dict) or "pull_request" in payload:
         return None
     return payload
+
+
+def issue_timeline_url(item):
+    timeline_url = str(item.get("timeline_url") or "")
+    if timeline_url:
+        return timeline_url
+    repository_url = str(item.get("repository_url") or "").rstrip("/")
+    number = item.get("number")
+    if repository_url and number is not None:
+        return f"{repository_url}/issues/{number}/timeline"
+    return ""
+
+
+def pr_explicitly_closes_issue(pr, item):
+    number = item.get("number")
+    if number is None:
+        match = re.search(r"/issues/(\d+)/?$", str(item.get("html_url") or ""))
+        number = match.group(1) if match else None
+    if number is None:
+        return False
+    repository = str(item.get("repository_url") or "").split("/repos/")[-1]
+    qualified = rf"(?:{re.escape(repository)}\s*)?" if repository else ""
+    issue_url = str(item.get("html_url") or "")
+    reference_parts = [rf"{qualified}#\s*{re.escape(str(number))}\b"]
+    if issue_url:
+        reference_parts.append(re.escape(issue_url))
+    reference = "(?:" + "|".join(reference_parts) + ")"
+    closing = rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?[ \t]*(?:[-*][ \t]*)?{reference}"
+    return bool(re.search(closing, str(pr.get("body") or ""), re.IGNORECASE))
+
+
+def fetch_related_pr_info(item, token=None):
+    """Count PR cross-references and flag only clearly completed merged work."""
+    timeline_url = issue_timeline_url(item)
+    unknown = {
+        "open_pr_count": None,
+        "merged_pr_count": None,
+        "completed_by_merged_pr": False,
+    }
+    if not timeline_url:
+        return unknown
+    separator = "&" if "?" in timeline_url else "?"
+    events = github_api_get(f"{timeline_url}{separator}per_page=100", token)
+    if not isinstance(events, list):
+        return unknown
+
+    pull_requests = {}
+    for event in events:
+        if not isinstance(event, dict) or event.get("event") != "cross-referenced":
+            continue
+        source_issue = event.get("source", {}).get("issue", {})
+        if not isinstance(source_issue, dict) or not source_issue.get("pull_request"):
+            continue
+        pr_url = str(source_issue.get("html_url") or source_issue.get("url") or "")
+        if pr_url:
+            pull_requests[pr_url] = source_issue
+
+    open_prs = []
+    merged_prs = []
+    for pr in pull_requests.values():
+        merged_at = (pr.get("pull_request") or {}).get("merged_at")
+        if merged_at:
+            merged_prs.append(pr)
+        elif pr.get("state") == "open":
+            open_prs.append(pr)
+    return {
+        "open_pr_count": len(open_prs),
+        "merged_pr_count": len(merged_prs),
+        "completed_by_merged_pr": any(pr_explicitly_closes_issue(pr, item) for pr in merged_prs),
+    }
+
+
+def first_win_rule(text):
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in FIRST_WIN_PATTERNS)
+
+
+def apply_pr_competition(candidate, pr_info, text):
+    """Attach PR counts and apply a modest ranking penalty without filtering."""
+    open_count = pr_info.get("open_pr_count")
+    merged_count = pr_info.get("merged_pr_count")
+    first_wins = first_win_rule(text)
+    candidate["open_pr_count"] = open_count
+    candidate["merged_pr_count"] = merged_count
+    candidate["first_wins"] = first_wins
+    if open_count is None:
+        candidate["competition"] = "待确认（相关 PR 检查失败）"
+        return candidate
+    if not open_count:
+        candidate["competition"] = "未发现相关 open PR"
+        return candidate
+
+    if first_wins:
+        penalty = min(open_count * 3, 9)
+        candidate["competition"] = f"高：{open_count} 个相关 open PR，且规则为 first wins"
+    else:
+        penalty = min(open_count, 3)
+        candidate["competition"] = f"有竞争：{open_count} 个相关 open PR"
+    candidate["score"] -= penalty
+    return candidate
 
 
 def fetch_github_document_url(url, token=None):
@@ -1148,6 +1306,7 @@ def scan_issues(token=None, host_repo=None):
         "safeguards": 0,
         "no_reward_offer": 0,
         "analysis_filtered": 0,
+        "merged_completed": 0,
         "matched": 0,
     }
     for query in ISSUE_SEARCH_QUERIES:
@@ -1177,12 +1336,14 @@ def scan_issues(token=None, host_repo=None):
                     stats["duplicates"] += 1
                     continue
                 seen_api_urls.add(url)
+                platform_rule = verified_platform_payment_rule(text=resolved["text"], url=url)
                 candidate = analyze_candidate(
                     title=resolved["title"],
                     project=resolved["project"],
                     url=url,
                     source="Repository Markdown",
                     text=resolved["text"],
+                    platform_payment_rule=platform_rule,
                 )
                 if candidate:
                     if resolved["kind"] == "external":
@@ -1214,6 +1375,12 @@ def scan_issues(token=None, host_repo=None):
             repo = str(item.get("repository_url", "")).split("/repos/")[-1]
             if not repo:
                 repo = url.removeprefix("https://github.com/").split("/issues/")[0]
+            labels = [
+                label.get("name")
+                for label in item.get("labels", [])
+                if isinstance(label, dict)
+            ]
+            platform_rule = verified_platform_payment_rule(text=text, labels=labels, url=url)
             candidate = analyze_candidate(
                 title=str(item.get("title") or "Untitled bounty"),
                 project=repo,
@@ -1222,8 +1389,14 @@ def scan_issues(token=None, host_repo=None):
                 text=text,
                 comments=item.get("comments"),
                 updated_at=item.get("updated_at"),
+                platform_payment_rule=platform_rule,
             )
             if candidate:
+                pr_info = fetch_related_pr_info(item, token)
+                if pr_info["completed_by_merged_pr"]:
+                    stats["merged_completed"] += 1
+                    continue
+                apply_pr_competition(candidate, pr_info, text)
                 if resolved.get("discovered_via"):
                     candidate["discovered_via"] = resolved["discovered_via"]
                 candidates.append(candidate)
@@ -1235,6 +1408,7 @@ def scan_issues(token=None, host_repo=None):
         f"raw={stats['raw']}, unique={len(seen_search_urls)}, duplicates={stats['duplicates']}, "
         f"unresolved={stats['unresolved']}, safeguards={stats['safeguards']}, "
         f"no_reward_offer={stats['no_reward_offer']}, analysis_filtered={stats['analysis_filtered']}, "
+        f"merged_completed={stats['merged_completed']}, "
         f"matched={stats['matched']}"
     )
     return candidates
@@ -1356,12 +1530,14 @@ def scan_documents(token=None):
 
     candidates = []
     for document in documents:
+        platform_rule = verified_platform_payment_rule(text=document["text"], url=document["url"])
         candidate = analyze_candidate(
             title=document["title"],
             project=document["project"],
             url=document["url"],
             source="Repository Markdown",
             text=document["text"],
+            platform_payment_rule=platform_rule,
         )
         if candidate:
             candidates.append(candidate)
@@ -1412,6 +1588,12 @@ def format_plain_notification(candidates, now_str, limit=3900):
             f"Coding Agent: {candidate['agent_fit']}",
             f"Effort: {candidate['effort']}",
         ]
+        if "open_pr_count" in candidate:
+            open_prs = candidate["open_pr_count"]
+            entry.append(f"Related open PRs: {open_prs if open_prs is not None else '待确认'}")
+            entry.append(f"Competition: {candidate['competition']}")
+        if candidate.get("payment_rule_source"):
+            entry.append(f"Payment rule source: {candidate['payment_rule_source']}")
         if candidate.get("comments") is not None:
             entry.append(f"Original comments: {candidate['comments']}")
         if candidate.get("discovered_via"):
@@ -1444,6 +1626,12 @@ def format_github_issue_body(candidates, now_str):
                 f"- **Estimated effort:** {candidate['effort']}",
             ]
         )
+        if "open_pr_count" in candidate:
+            open_prs = candidate["open_pr_count"]
+            lines.append(f"- **Related open PRs:** {open_prs if open_prs is not None else '待确认'}")
+            lines.append(f"- **Competition:** {candidate['competition']}")
+        if candidate.get("payment_rule_source"):
+            lines.append(f"- **Payment rule source:** {candidate['payment_rule_source']}")
         if candidate.get("discovered_via"):
             lines.append(f"- **Discovered via:** {candidate['discovered_via']}")
         if candidate.get("comments") is not None:
