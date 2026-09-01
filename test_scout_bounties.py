@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 import scout_bounties as scout
 
@@ -141,7 +142,7 @@ class CandidateAnalysisTests(unittest.TestCase):
             "example/pricing",
             "https://github.com/example/pricing/issues/1",
             "GitHub Issue",
-            "Calls cost $0.01 each.\n\n## Reward\n$15 USD paid in USDC after merge.\n\nImplement one pricing function.",
+            "Calls cost $0.01 each.\n\n## Reward\n$15 USD paid via PayPal or USDC after merge.\n\nImplement one pricing function.",
             now=NOW,
         )
         self.assertEqual(candidate["reward"], "$15 USD")
@@ -174,6 +175,7 @@ class TriageAndStateTests(unittest.TestCase):
             "repository_url": "https://api.github.com/repos/owner/repo",
         }
         self.assertTrue(scout.is_clean_issue(base))
+        self.assertFalse(scout.is_clean_issue({**base, "state": "closed"}))
         self.assertFalse(scout.is_clean_issue({**base, "assignees": [{"login": "taken"}]}))
         self.assertFalse(scout.is_clean_issue({**base, "comments": 26}))
         self.assertFalse(scout.is_clean_issue({**base, "pull_request": {}}))
@@ -208,17 +210,54 @@ class TriageAndStateTests(unittest.TestCase):
         self.assertFalse(scout.has_issue_reward_offer(paused))
         self.assertFalse(scout.has_issue_reward_offer(submitted_claim))
 
-    def test_extracts_xlm_and_grantfox_payment(self):
+    def test_rejects_crypto_only_payments(self):
+        assets = ("USDC", "USDT", "BTC", "sats", "Lightning", "ETH", "SOL", "XLM", "DAI")
+        for asset in assets:
+            with self.subTest(asset=asset):
+                candidate = scout.analyze_candidate(
+                    "[BOUNTY] Small parser fix",
+                    "example/parser",
+                    "https://github.com/example/parser/issues/1",
+                    "GitHub Issue",
+                    f"Bounty: $50. Fix one parser edge case. Payout is only in {asset} after merge.",
+                    now=NOW,
+                )
+                self.assertIsNone(candidate)
+
+    def test_keeps_mixed_fiat_and_crypto_payment(self):
         candidate = scout.analyze_candidate(
             "[BOUNTY] Small parser fix",
             "example/parser",
             "https://github.com/example/parser/issues/1",
             "GitHub Issue",
-            "Bounty: 100 XLM. Fix one parser edge case. Reward: 100 XLM via GrantFox after merge.",
+            "Bounty: $50. Fix one parser edge case. Payout via PayPal or USDC after merge.",
             now=NOW,
         )
-        self.assertEqual(candidate["reward"], "100 XLM")
-        self.assertEqual(candidate["payment_method"], "XLM、GrantFox")
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["payment_method"], "PayPal、USDC")
+
+    def test_negated_fiat_option_does_not_bypass_crypto_filter(self):
+        candidate = scout.analyze_candidate(
+            "[BOUNTY] Small parser fix",
+            "example/parser",
+            "https://github.com/example/parser/issues/1",
+            "GitHub Issue",
+            "Bounty: $50. Fix one parser edge case. Payout is USDC only; PayPal is not available.",
+            now=NOW,
+        )
+        self.assertIsNone(candidate)
+
+    def test_reward_platform_without_payout_channel_stays_unknown(self):
+        candidate = scout.analyze_candidate(
+            "[BOUNTY] Small parser fix",
+            "example/parser",
+            "https://github.com/example/parser/issues/1",
+            "GitHub Issue",
+            "Bounty: $50. Fix one parser edge case. GrantFox reward consideration applies after review.",
+            now=NOW,
+        )
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["payment_method"], "待确认")
 
     def test_expired_day_first_deadline_is_rejected(self):
         candidate = scout.analyze_candidate(
@@ -269,6 +308,102 @@ class TriageAndStateTests(unittest.TestCase):
         }
         self.assertEqual(scout.deduplicate_and_rank([first, duplicate]), [duplicate])
 
+    def test_radar_is_resolved_to_original_issue_metadata(self):
+        radar = {
+            "html_url": "https://github.com/radar/alerts/issues/9",
+            "repository_url": "https://api.github.com/repos/radar/alerts",
+            "title": "[radar] New bounty",
+            "body": "Original Issue URL: https://github.com/source/project/issues/42",
+            "labels": [{"name": "radar"}],
+            "comments": 99,
+        }
+        original = {
+            "html_url": "https://github.com/source/project/issues/42",
+            "repository_url": "https://api.github.com/repos/source/project",
+            "title": "[BOUNTY] Fix one parser edge case",
+            "body": "Bounty: $75. Fix the parser and submit a Pull Request. Payout via PayPal.",
+            "labels": [{"name": "bounty"}],
+            "assignees": [],
+            "comments": 3,
+            "state": "open",
+            "updated_at": "2026-09-01T01:00:00Z",
+        }
+
+        with mock.patch.object(scout, "search_endpoint", return_value={"items": [radar]}), mock.patch.object(
+            scout, "github_api_get", return_value=original
+        ):
+            candidates = scout.scan_issues("token")
+
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+        self.assertEqual(candidate["project"], "source/project")
+        self.assertEqual(candidate["url"], original["html_url"])
+        self.assertEqual(candidate["comments"], 3)
+        self.assertEqual(candidate["reward"], "$75")
+        self.assertEqual(candidate["payment_method"], "PayPal")
+        self.assertEqual(candidate["discovered_via"], radar["html_url"])
+
+    def test_unresolved_radar_is_not_reported(self):
+        radar = {
+            "html_url": "https://github.com/radar/alerts/issues/10",
+            "title": "[radar] Bounty alert without source link",
+            "body": "A generated notification with no original task URL.",
+            "labels": [{"name": "radar"}],
+        }
+        self.assertIsNone(scout.resolve_radar_source(radar, "token"))
+
+    def test_crypto_only_original_behind_radar_is_filtered(self):
+        radar = {
+            "html_url": "https://github.com/radar/alerts/issues/12",
+            "title": "[radar] Crypto bounty",
+            "body": "Original Issue URL: https://github.com/source/project/issues/55",
+            "labels": [{"name": "radar"}],
+        }
+        original = {
+            "html_url": "https://github.com/source/project/issues/55",
+            "repository_url": "https://api.github.com/repos/source/project",
+            "title": "[BOUNTY] Fix parser",
+            "body": "Bounty: $100. Fix the parser. Payout is USDC only.",
+            "labels": [{"name": "bounty"}],
+            "assignees": [],
+            "comments": 1,
+            "state": "open",
+        }
+        with mock.patch.object(scout, "search_endpoint", return_value={"items": [radar]}), mock.patch.object(
+            scout, "github_api_get", return_value=original
+        ):
+            self.assertEqual(scout.scan_issues("token"), [])
+
+    def test_radar_can_resolve_an_external_bounty_page(self):
+        radar = {
+            "html_url": "https://github.com/radar/alerts/issues/11",
+            "title": "[radar] External challenge",
+            "body": "Original Task URL: https://challenge.example/tasks/parser",
+            "labels": [{"name": "radar"}],
+        }
+        page = """
+        <html><head><title>Parser Micro Challenge</title></head><body>
+        <h1>Cash prize: $80</h1>
+        <p>Fix one parser edge case and submit a Pull Request.</p>
+        <p>Deadline: 2026-12-31. Winners are paid via Wise.</p>
+        </body></html>
+        """
+        with mock.patch.object(scout, "fetch_text_url", return_value=page):
+            resolved = scout.resolve_radar_source(radar, "token")
+
+        self.assertEqual(resolved["kind"], "external")
+        self.assertEqual(resolved["url"], "https://challenge.example/tasks/parser")
+        self.assertIn("Cash prize: $80", resolved["text"])
+
+        with mock.patch.object(scout, "search_endpoint", return_value={"items": [radar]}), mock.patch.object(
+            scout, "fetch_text_url", return_value=page
+        ):
+            candidates = scout.scan_issues("token")
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["source"], "External bounty page")
+        self.assertEqual(candidates[0]["payment_method"], "Wise")
+        self.assertEqual(candidates[0]["project"], "challenge.example")
+
 
 class FormattingTests(unittest.TestCase):
     def test_notification_contains_required_fields_and_obeys_limit(self):
@@ -284,11 +419,15 @@ class FormattingTests(unittest.TestCase):
             "payment_method": "待确认",
             "agent_fit": "是",
             "effort": "推测：数小时",
+            "comments": 3,
+            "discovered_via": "https://github.com/radar/alerts/issues/1",
         }
         message = scout.format_plain_notification([candidate] * 10, "2026-09-01 00:00 UTC", limit=700)
         self.assertLessEqual(len(message), 700)
         self.assertIn("Payment: 待确认", message)
         self.assertIn("Coding Agent: 是", message)
+        self.assertIn("Original comments: 3", message)
+        self.assertIn("Discovered via:", message)
         self.assertIn("…and", message)
 
 

@@ -8,6 +8,8 @@ available, it falls back to repository README search and a small Markdown crawl.
 
 import argparse
 import base64
+import html
+import ipaddress
 import json
 import os
 import re
@@ -204,13 +206,21 @@ PAYMENT_METHOD_PATTERNS = (
     ("Stripe", r"\bstripe\b"),
     ("银行转账", r"\b(?:bank|wire)\s+transfer\b|银行转账"),
     ("USDC", r"\busdc\b"),
+    ("USDT", r"\busdt\b|\btether\b"),
+    ("DAI", r"\bdai\b"),
+    ("BTC", r"\bbtc\b|\bbitcoin\b"),
+    ("sats", r"\bsats?\b|\bsatoshis?\b|\blightning(?: network)?\b"),
     ("XLM", r"\bxlm\b"),
     ("ETH", r"\beth\b|\bether\b"),
     ("SOL", r"\bsol\b"),
-    ("GrantFox", r"\bgrantfox\b"),
     ("支付宝", r"\balipay\b|支付宝"),
     ("微信支付", r"\bwechat pay\b|微信支付"),
 )
+
+FIAT_PAYMENT_METHODS = {"PayPal", "Wise", "Stripe", "银行转账", "支付宝", "微信支付"}
+CRYPTO_PAYMENT_METHODS = {"USDC", "USDT", "DAI", "BTC", "sats", "XLM", "ETH", "SOL"}
+RADAR_LABEL_HINTS = {"radar", "aggregator", "external-mirror", "bounty-hunter", "mirror"}
+MAX_SOURCE_HOPS = 3
 
 AMOUNT_PATTERNS = (
     r"(?:US\$|USD|USDC|EUR|GBP|CNY|RMB|CAD|AUD|INR|XLM|ETH|SOL|USDT|DAI|BTC|€|£|¥|₹|\$)\s*"
@@ -307,7 +317,7 @@ def fetch_text_url(url, token=None):
     request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=25) as response:
-            return response.read().decode("utf-8", errors="replace")
+            return response.read(1_000_000).decode("utf-8", errors="replace")
     except (urllib.error.URLError, TimeoutError) as exc:
         log(f"Unable to fetch document {url}: {exc}")
         return ""
@@ -489,7 +499,8 @@ def payment_context(text):
     for line in lines:
         lower = line.lower()
         if any(term in lower for term in STRONG_REWARD_TERMS + GENERIC_REWARD_TERMS) or re.search(
-            r"\bpay(?:ment|out|pal|ing|able|ed)?\b|winner|receive|bank transfer|wire transfer|usdc",
+            r"\bpay(?:ment|out|pal|ing|able|ed)?\b|winner|receive|bank transfer|wire transfer"
+            r"|usdc|usdt|tether|\bbtc\b|bitcoin|sats?|satoshi|lightning|\bxlm\b|\beth\b|\bsol\b|\bdai\b",
             lower,
         ):
             selected.append(line)
@@ -498,7 +509,35 @@ def payment_context(text):
 
 def extract_payment_methods(text):
     context = payment_context(text)
-    return [name for name, pattern in PAYMENT_METHOD_PATTERNS if re.search(pattern, context, re.IGNORECASE)]
+    methods = []
+    clauses = re.split(r"[;,\n]|\b(?:but|and)\b", context, flags=re.IGNORECASE)
+    for name, pattern in PAYMENT_METHOD_PATTERNS:
+        matching_clauses = [clause for clause in clauses if re.search(pattern, clause, re.IGNORECASE)]
+        usable_clauses = [
+            clause
+            for clause in matching_clauses
+            if not payment_method_is_negated(clause, pattern)
+        ]
+        if usable_clauses:
+            methods.append(name)
+    return methods
+
+
+def payment_method_is_negated(clause, pattern):
+    wrapped_pattern = f"(?:{pattern})"
+    negative_pattern = (
+        r"\b(?:no|without|unsupported|not(?!\s+only))\b.{0,30}"
+        + wrapped_pattern
+        + r"|"
+        + wrapped_pattern
+        + r".{0,30}\b(?:unavailable|unsupported|not supported|not available)\b"
+    )
+    return bool(re.search(negative_pattern, clause, re.IGNORECASE))
+
+
+def is_crypto_only_payment(methods):
+    method_set = set(methods)
+    return bool(method_set & CRYPTO_PAYMENT_METHODS) and not bool(method_set & FIAT_PAYMENT_METHODS)
 
 
 def first_matching_line(text, patterns, max_length=280):
@@ -699,6 +738,8 @@ def analyze_candidate(title, project, url, source, text, comments=None, updated_
 
     amounts = extract_reward_amounts(context)
     methods = extract_payment_methods(text)
+    if is_crypto_only_payment(methods):
+        return None
     strong_hit = any(term in lower for term in STRONG_REWARD_TERMS)
     generic_hit = any(term in lower for term in GENERIC_REWARD_TERMS)
     cash_hit = bool(amounts or methods or re.search(r"\bcash\b|\bpaid\b|\bmonetary\b", lower))
@@ -769,6 +810,8 @@ def analyze_candidate(title, project, url, source, text, comments=None, updated_
 
 def is_clean_issue(item, host_repo=None):
     """Retain original safeguards and prevent alert feedback loops."""
+    if item.get("state") not in (None, "open"):
+        return False
     if "pull_request" in item or item.get("assignees"):
         return False
     if int(item.get("comments", 0) or 0) > MAX_COMMENTS:
@@ -840,25 +883,231 @@ def has_issue_reward_offer(item):
     )
 
 
-def extract_original_issue_url(text):
-    match = re.search(
-        r"(?:原\s*URL|original\s+URL|source\s+URL)\s*[:|]\s*"
-        r"(https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/\d+)",
-        text,
-        re.IGNORECASE,
+def is_radar_issue(item):
+    labels = {
+        str(label.get("name") or "").lower()
+        for label in item.get("labels", [])
+        if isinstance(label, dict)
+    }
+    title = str(item.get("title") or "").lower()
+    body = str(item.get("body") or "").lower()
+    return bool(
+        labels & RADAR_LABEL_HINTS
+        or re.search(r"(?:^|[\[(:-])\s*(?:bounty\s+)?(?:radar|aggregator|mirror)\b", title)
+        or "外部 bounty 任务镜像" in body
+        or "this bounty is now mirrored" in body
     )
-    return match.group(1) if match else ""
+
+
+def extract_linked_source_urls(text):
+    labelled_patterns = (
+        r"(?:原\s*URL|original\s+(?:issue|task|bounty|source)?\s*URL|source\s+URL|bounty\s+URL|task\s+URL)"
+        r"\s*[:|]\s*(https?://[^\s<>|)\]]+)",
+        r"\[(?:original|source|原始)(?:\s+(?:issue|task|bounty|page))?\]\((https?://[^)]+)\)",
+    )
+    urls = []
+    for pattern in labelled_patterns:
+        urls.extend(re.findall(pattern, text, re.IGNORECASE))
+    urls.extend(
+        re.findall(
+            r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/\d+",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    deduplicated = []
+    for url in urls:
+        cleaned = url.replace("&amp;", "&").rstrip(".,;|`")
+        if cleaned not in deduplicated:
+            deduplicated.append(cleaned)
+    return deduplicated
+
+
+def fetch_github_issue_url(url, token=None):
+    parsed = urllib.parse.urlparse(url)
+    match = re.fullmatch(r"/([^/]+)/([^/]+)/issues/(\d+)/?", parsed.path)
+    if parsed.netloc.lower() != "github.com" or not match:
+        return None
+    owner, repo, number = match.groups()
+    payload = github_api_get(f"/repos/{owner}/{repo}/issues/{number}", token)
+    if not isinstance(payload, dict) or "pull_request" in payload:
+        return None
+    return payload
+
+
+def fetch_github_document_url(url, token=None):
+    parsed = urllib.parse.urlparse(url)
+    match = re.fullmatch(r"/([^/]+)/([^/]+)/blob/([^/]+)/(.+)", parsed.path)
+    if parsed.netloc.lower() != "github.com" or not match:
+        return None
+    owner, repo, ref, path = (urllib.parse.unquote(part) for part in match.groups())
+    if not path.lower().endswith((".md", ".markdown", ".mdx")):
+        return None
+    encoded_repo = urllib.parse.quote(f"{owner}/{repo}", safe="/")
+    encoded_path = urllib.parse.quote(path, safe="/")
+    encoded_ref = urllib.parse.quote(ref, safe="")
+    payload = github_api_get(f"/repos/{encoded_repo}/contents/{encoded_path}?ref={encoded_ref}", token)
+    content = decode_content_payload(payload, token)
+    if not content:
+        return None
+    return {
+        "kind": "document",
+        "title": f"{owner}/{repo} — {path}",
+        "project": f"{owner}/{repo}",
+        "url": url,
+        "text": content,
+    }
+
+
+def safe_public_http_url(url):
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    hostname = parsed.hostname.lower()
+    if hostname in {"localhost", "docs.google.com", "forms.gle"} or hostname.endswith(".local"):
+        return False
+    try:
+        address = ipaddress.ip_address(hostname)
+        if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
+            return False
+    except ValueError:
+        pass
+    return True
+
+
+def html_to_plain_text(content):
+    without_scripts = re.sub(
+        r"<(?:script|style|noscript)\b[^>]*>.*?</(?:script|style|noscript)>",
+        " ",
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    with_breaks = re.sub(
+        r"</?(?:p|div|section|article|main|h[1-6]|li|tr|br)\b[^>]*>",
+        "\n",
+        without_scripts,
+        flags=re.IGNORECASE,
+    )
+    without_tags = re.sub(r"<[^>]+>", " ", with_breaks)
+    decoded = html.unescape(without_tags)
+    return "\n".join(re.sub(r"\s+", " ", line).strip() for line in decoded.splitlines() if line.strip())
+
+
+def fetch_external_page_source(url):
+    if not safe_public_http_url(url):
+        return None
+    content = fetch_text_url(url)
+    if not content:
+        return None
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
+    page_text = html_to_plain_text(content) if "<" in content and ">" in content else content
+    if len(page_text.strip()) < 80:
+        return None
+    parsed = urllib.parse.urlparse(url)
+    page_title = clean_line(html_to_plain_text(title_match.group(1))) if title_match else ""
+    return {
+        "kind": "external",
+        "title": page_title or f"{parsed.hostname} bounty page",
+        "project": parsed.hostname,
+        "project_url": f"{parsed.scheme}://{parsed.netloc}",
+        "url": url,
+        "text": page_text,
+    }
+
+
+def resolve_radar_source(item, token=None, max_hops=MAX_SOURCE_HOPS):
+    """Follow a short chain of explicit GitHub source links from radar Issues."""
+    if not is_radar_issue(item):
+        return {"kind": "issue", "item": item}
+
+    discovery_url = str(item.get("html_url") or "")
+    current = item
+    visited = {discovery_url} if discovery_url else set()
+    for _ in range(max_hops):
+        links = extract_linked_source_urls(str(current.get("body") or ""))
+        next_radar = None
+        for source_url in links:
+            if source_url in visited:
+                continue
+            visited.add(source_url)
+            linked_issue = fetch_github_issue_url(source_url, token)
+            if linked_issue:
+                if is_radar_issue(linked_issue):
+                    next_radar = linked_issue
+                    continue
+                if has_issue_reward_offer(linked_issue):
+                    return {"kind": "issue", "item": linked_issue, "discovered_via": discovery_url}
+                continue
+            parsed_source = urllib.parse.urlparse(source_url)
+            source_path = parsed_source.path
+            if parsed_source.netloc.lower() == "github.com" and re.fullmatch(
+                r"/[^/]+/[^/]+/issues/\d+/?", source_path
+            ):
+                continue
+            linked_document = fetch_github_document_url(source_url, token)
+            if linked_document:
+                linked_document["discovered_via"] = discovery_url
+                return linked_document
+            if parsed_source.netloc.lower() == "github.com" and re.fullmatch(
+                r"/[^/]+/[^/]+/blob/[^/]+/.+", source_path
+            ):
+                continue
+            linked_page = fetch_external_page_source(source_url)
+            if linked_page:
+                linked_page["discovered_via"] = discovery_url
+                return linked_page
+        if next_radar is None:
+            return None
+        current = next_radar
+    return None
+
+
+def extract_original_issue_url(text):
+    for url in extract_linked_source_urls(text):
+        if re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/\d+", url, re.IGNORECASE):
+            return url
+    return ""
 
 
 def scan_issues(token=None, host_repo=None):
     candidates = []
     seen_api_urls = set()
+    seen_search_urls = set()
     for query in ISSUE_SEARCH_QUERIES:
         log(f"Issue search: {query}")
         results = search_endpoint("issues", query, token, per_page=ISSUE_RESULTS_PER_QUERY)
         if not results:
             continue
-        for item in results.get("items", []):
+        for search_item in results.get("items", []):
+            search_url = search_item.get("html_url")
+            if not search_url or search_url in seen_search_urls:
+                continue
+            seen_search_urls.add(search_url)
+            resolved = resolve_radar_source(search_item, token)
+            if not resolved:
+                continue
+
+            if resolved["kind"] in ("document", "external"):
+                url = resolved["url"]
+                if url in seen_api_urls:
+                    continue
+                seen_api_urls.add(url)
+                candidate = analyze_candidate(
+                    title=resolved["title"],
+                    project=resolved["project"],
+                    url=url,
+                    source="Repository Markdown",
+                    text=resolved["text"],
+                )
+                if candidate:
+                    if resolved["kind"] == "external":
+                        candidate["source"] = "External bounty page"
+                        candidate["project_url"] = resolved["project_url"]
+                    candidate["discovered_via"] = resolved.get("discovered_via")
+                    candidates.append(candidate)
+                continue
+
+            item = resolved["item"]
             url = item.get("html_url")
             if (
                 not url
@@ -869,23 +1118,21 @@ def scan_issues(token=None, host_repo=None):
                 continue
             seen_api_urls.add(url)
             text = "\n".join((str(item.get("title") or ""), str(item.get("body") or "")))
-            original_url = extract_original_issue_url(text)
-            candidate_url = original_url or url
             repo = str(item.get("repository_url", "")).split("/repos/")[-1]
-            if original_url:
-                repo = original_url.removeprefix("https://github.com/").split("/issues/")[0]
             if not repo:
                 repo = url.removeprefix("https://github.com/").split("/issues/")[0]
             candidate = analyze_candidate(
                 title=str(item.get("title") or "Untitled bounty"),
                 project=repo,
-                url=candidate_url,
+                url=url,
                 source="GitHub Issue",
                 text=text,
                 comments=item.get("comments"),
                 updated_at=item.get("updated_at"),
             )
             if candidate:
+                if resolved.get("discovered_via"):
+                    candidate["discovered_via"] = resolved["discovered_via"]
                 candidates.append(candidate)
     return candidates
 
@@ -1050,9 +1297,12 @@ def format_plain_notification(candidates, now_str, limit=3900):
             f"Payment: {candidate['payment_method']}",
             f"Coding Agent: {candidate['agent_fit']}",
             f"Effort: {candidate['effort']}",
-            f"Link: {candidate['url']}",
-            "",
         ]
+        if candidate.get("comments") is not None:
+            entry.append(f"Original comments: {candidate['comments']}")
+        if candidate.get("discovered_via"):
+            entry.append(f"Discovered via: {candidate['discovered_via']}")
+        entry.extend((f"Link: {candidate['url']}", ""))
         proposed = "\n".join(lines + entry)
         if len(proposed) > limit:
             remaining = len(candidates) - index + 1
@@ -1065,10 +1315,11 @@ def format_plain_notification(candidates, now_str, limit=3900):
 def format_github_issue_body(candidates, now_str):
     lines = ["### Active Micro Bounty Scan Results", "", f"**Scan Time:** {now_str}", ""]
     for index, candidate in enumerate(candidates, 1):
+        project_url = candidate.get("project_url", "https://github.com/" + candidate["project"])
         lines.extend(
             [
                 f"#### {index}. [{candidate['title']}]({candidate['url']})",
-                f"- **Project:** [{candidate['project']}](https://github.com/{candidate['project']})",
+                f"- **Project:** [{candidate['project']}]({project_url})",
                 f"- **Source:** {candidate['source']}",
                 f"- **Reward:** {candidate['reward']}",
                 f"- **Task:** {candidate['task']}",
@@ -1079,8 +1330,10 @@ def format_github_issue_body(candidates, now_str):
                 f"- **Estimated effort:** {candidate['effort']}",
             ]
         )
+        if candidate.get("discovered_via"):
+            lines.append(f"- **Discovered via:** {candidate['discovered_via']}")
         if candidate.get("comments") is not None:
-            lines.append(f"- **Comments:** {candidate['comments']}")
+            lines.append(f"- **Original Issue comments:** {candidate['comments']}")
         if candidate.get("updated_at"):
             lines.append(f"- **Last updated:** {candidate['updated_at']}")
         lines.append("")
