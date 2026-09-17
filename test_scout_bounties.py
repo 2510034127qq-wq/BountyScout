@@ -463,6 +463,37 @@ class TriageAndStateTests(unittest.TestCase):
         )
         self.assertIsNone(candidate)
 
+        virtual_footer_reasons = []
+        virtual_footer = scout.analyze_candidate(
+            "Monthly contributor stats",
+            "zhangjiayang6835-cyber/ai-research",
+            "https://github.com/zhangjiayang6835-cyber/ai-research/issues/1533",
+            "GitHub Issue",
+            """
+            Total Bounty Distributed: $4770
+            虚拟代币仅供学习排名使用，不可兑换为现金或加密货币。
+            """,
+            now=NOW,
+            reward_offer_confirmed=True,
+            rejection_reasons=virtual_footer_reasons,
+        )
+        self.assertIsNone(virtual_footer)
+        self.assertEqual(virtual_footer_reasons, ["no reward link"])
+
+        english_virtual_reasons = []
+        english_virtual = scout.analyze_candidate(
+            "Contributor payout summary",
+            "example/stats",
+            "https://github.com/example/stats/issues/1",
+            "GitHub Issue",
+            "Virtual tokens for ranking only; cannot be redeemed for cash or cryptocurrency.",
+            now=NOW,
+            reward_offer_confirmed=True,
+            rejection_reasons=english_virtual_reasons,
+        )
+        self.assertIsNone(english_virtual)
+        self.assertEqual(english_virtual_reasons, ["no reward link"])
+
         current = scout.analyze_candidate(
             "[BOUNTY] Fix leaderboard sorting",
             "example/game",
@@ -1461,6 +1492,80 @@ class FormattingTests(unittest.TestCase):
         self.assertIn("**Related open PRs:** 1", issue_body)
         self.assertNotIn("Issue scan summary", issue_body)
         self.assertNotIn("analysis_filtered=", issue_body)
+
+
+class ExternalFetchSecurityTests(unittest.TestCase):
+    def test_safe_public_http_url_rejects_common_ssrf_bypass_hosts(self):
+        blocked = (
+            "http://127.0.0.1/",
+            "http://0177.0.0.1/",
+            "http://2130706433/",
+            "http://0x7f000001/",
+            "http://127.1/",
+            "http://[::1]/",
+            "http://169.254.169.254/",
+            "http://10.0.0.1/",
+            "http://metadata.google.internal/",
+            "https://localhost/",
+        )
+        for url in blocked:
+            self.assertFalse(scout.safe_public_http_url(url), url)
+
+        self.assertTrue(scout.safe_public_http_url("https://example.com/bounty"))
+
+    def test_fetch_external_page_source_rejects_blocked_url(self):
+        self.assertIsNone(scout.fetch_external_page_source("http://127.0.0.1/"))
+
+    def test_restricted_fetch_rejects_redirect_to_private_target(self):
+        handler = scout.SafeRedirectHandler()
+        request = scout.urllib.request.Request("http://example.com/start")
+        redirected = handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {"Location": "http://169.254.169.254/latest/meta-data/"},
+            "http://169.254.169.254/latest/meta-data/",
+        )
+        self.assertIsNone(redirected)
+
+        allowed = handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {"Location": "https://example.com/task"},
+            "https://example.com/task",
+        )
+        self.assertIsNotNone(allowed)
+        self.assertEqual(allowed.full_url, "https://example.com/task")
+
+    def test_fetch_external_page_source_blocks_redirect_to_private_target(self):
+        """Integration: public URL → restricted fetch → blocked private redirect → None."""
+
+        real_build_opener = scout.urllib.request.build_opener
+
+        class FakePublicRedirectHandler(scout.urllib.request.BaseHandler):
+            handler_order = scout.urllib.request.HTTPHandler.handler_order - 1
+
+            def http_open(self, req):
+                raise scout.urllib.error.HTTPError(
+                    req.full_url,
+                    302,
+                    "Found",
+                    {"Location": "http://169.254.169.254/latest/meta-data/"},
+                    io.BytesIO(b""),
+                )
+
+        def fake_build_opener(*handlers):
+            if any(isinstance(handler, scout.SafeRedirectHandler) for handler in handlers):
+                return real_build_opener(FakePublicRedirectHandler(), *handlers)
+            return real_build_opener(*handlers)
+
+        with mock.patch("scout_bounties.urllib.request.build_opener", side_effect=fake_build_opener):
+            result = scout.fetch_external_page_source("http://example.com/bounty-task")
+
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
