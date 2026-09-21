@@ -1,0 +1,1 @@
+billabletranscriptionseconds = max(0, min(10, value))
