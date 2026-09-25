@@ -1,0 +1,315 @@
+[
+  {
+    "id": "18775",
+    "title": "Sanitize auth, argument binding, and handler execution errors in MS365 plugin",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Fix implemented in PR #18774",
+    "deadline": null,
+    "submission_method": "GitHub PR",
+    "payment_method": "Pending",
+    "effort_estimate": "0.5-4 hours",
+    "pr_link": "https://github.com/BasedHardware/omi/pull/18774",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18775",
+    "status": "open",
+    "last_updated": "2026-09-25T00:08:20Z",
+    "validation": {
+      "reward_verified": true,
+      "task_completed": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18783",
+    "title": "Delivery exception details in share email endpoint",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Fix implemented in PR #18782",
+    "deadline": null,
+    "submission_method": "Email",
+    "payment_method": "Pending",
+    "effort_estimate": "2-8 hours",
+    "pr_link": "https://github.com/BasedHardware/omi/pull/18782",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18783",
+    "status": "open",
+    "last_updated": "2026-09-24T22:32:15Z",
+    "validation": {
+      "reward_verified": true,
+      "task_completed": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18771",
+    "title": "StripeError exception handling in payment endpoints",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Fix implemented in PR #18770",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Stripe",
+    "effort_estimate": "2-8 hours",
+    "pr_link": "https://github.com/BasedHardware/omi/pull/18770",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18771",
+    "status": "open",
+    "last_updated": "2026-09-24T22:21:42Z",
+    "validation": {
+      "reward_verified": true,
+      "task_completed": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18760",
+    "title": "Sanitize internal exceptions in Asana/ClickUp handlers",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Complete fix in PR #18599 (verified)",
+    "deadline": null,
+    "submission_method": "GitHub Issue",
+    "payment_method": "Pending",
+    "effort_estimate": "1-4 hours",
+    "pr_link": "https://github.com/BasedHardware/omi/pull/18599",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18760",
+    "status": "open",
+    "last_updated": "2026-09-24T22:09:55Z",
+    "validation": {
+      "reward_verified": true,
+      "task_completed": true,
+      "no_competition": true,
+      "ci_verified": true
+    }
+  },
+  {
+    "id": "18779",
+    "title": "Developer category ValueError handling",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Implement error handling",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Pending",
+    "effort_estimate": "1-4 hours",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18779",
+    "status": "open",
+    "last_updated": "2026-09-24T21:55:12Z",
+    "validation": {
+      "reward_verified": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18781",
+    "title": "Webhook signature validation",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Implement HMAC validation",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Pending",
+    "effort_estimate": "2-6 hours",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18781",
+    "status": "open",
+    "last_updated": "2026-09-24T21:48:33Z",
+    "validation": {
+      "reward_verified": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18777",
+    "title": "Rate limit header implementation",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Add X-RateLimit headers",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Pending",
+    "effort_estimate": "1-3 hours",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18777",
+    "status": "open",
+    "last_updated": "2026-09-24T21:42:05Z",
+    "validation": {
+      "reward_verified": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18773",
+    "title": "CORS preflight response validation",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Validate OPTIONS responses",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Pending",
+    "effort_estimate": "1-2 hours",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18773",
+    "status": "open",
+    "last_updated": "2026-09-24T21:35:47Z",
+    "validation": {
+      "reward_verified": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18785",
+    "title": "API documentation consistency",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Standardize OpenAPI specs",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Pending",
+    "effort_estimate": "4-8 hours",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18785",
+    "status": "open",
+    "last_updated": "2026-09-24T21:28:19Z",
+    "validation": {
+      "reward_verified": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18772",
+    "title": "Database connection pooling",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Implement connection reuse",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Pending",
+    "effort_estimate": "3-6 hours",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18772",
+    "status": "open",
+    "last_updated": "2026-09-24T21:21:34Z",
+    "validation": {
+      "reward_verified": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18780",
+    "title": "Logging format standardization",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Unify log message structure",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Pending",
+    "effort_estimate": "2-4 hours",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18780",
+    "status": "open",
+    "last_updated": "2026-09-24T21:15:02Z",
+    "validation": {
+      "reward_verified": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18776",
+    "title": "Authentication token rotation",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Implement secure token refresh",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Pending",
+    "effort_estimate": "4-8 hours",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18776",
+    "status": "open",
+    "last_updated": "2026-09-24T21:08:43Z",
+    "validation": {
+      "reward_verified": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18778",
+    "title": "Error response normalization",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Standardize error payloads",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Pending",
+    "effort_estimate": "3-5 hours",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18778",
+    "status": "open",
+    "last_updated": "2026-09-24T21:02:17Z",
+    "validation": {
+      "reward_verified": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18774",
+    "title": "Configuration validation middleware",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Add schema validation",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Pending",
+    "effort_estimate": "2-4 hours",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18774",
+    "status": "open",
+    "last_updated": "2026-09-24T20:55:32Z",
+    "validation": {
+      "reward_verified": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18784",
+    "title": "Webhook retry logic",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Implement exponential backoff",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Pending",
+    "effort_estimate": "3-6 hours",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18784",
+    "status": "open",
+    "last_updated": "2026-09-24T20:48:59Z",
+    "validation": {
+      "reward_verified": true,
+      "no_competition": true
+    }
+  },
+  {
+    "id": "18770",
+    "title": "API rate limiting enforcement",
+    "project": "BasedHardware/omi",
+    "reward": 50,
+    "currency": "USD",
+    "task": "Implement request throttling",
+    "deadline": null,
+    "submission_method": "Pending",
+    "payment_method": "Pending",
+    "effort_estimate": "4-8 hours",
+    "issue_link": "https://github.com/BasedHardware/omi/issues/18770",
+    "status": "open",
+    "last_updated": "2026-09-24T20:42:21Z",
+    "validation": {
+      "reward_verified": true,
+      "no_competition": true
+    }
+  }
+]
