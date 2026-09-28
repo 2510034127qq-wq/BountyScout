@@ -1,0 +1,30 @@
+{
+  "id": "zcash-grant-450",
+  "project": "ZcashCommunityGrants/zcashcommunitygrants",
+  "source": "github-issue",
+  "title": "Global Community & Marketing Operations",
+  "description": "Grant application for Zcash community initiatives",
+  "reward": {
+    "amount": 3000,
+    "currency": "USD",
+    "status": "confirmed"
+  },
+  "deadline": "TBD",
+  "submission_method": ["github-issue", "pull-request", "discord"],
+  "coding_agent_fit": "confirmed",
+  "estimated_effort": "1-8 hours",
+  "competition": {
+    "assignees": 7,
+    "open_prs": 1,
+    "notes": "Moderate competition detected"
+  },
+  "metadata": {
+    "last_updated": "2026-09-28T14:54:21Z",
+    "issue_url": "https://github.com/ZcashCommunityGrants/zcashcommunitygrants/issues/450",
+    "comments": 2,
+    "contribution_guidelines": [
+      "https://github.com/zcash/librustzcash/blob/main/CONTRIBUTING.md#merge-workflow",
+      "https://github.com/zcash/librustzcash/blob/main/CONTRIBUTING.md#branch-workflow"
+    ]
+  }
+}
