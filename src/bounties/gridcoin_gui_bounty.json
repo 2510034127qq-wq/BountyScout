@@ -1,0 +1,26 @@
+{
+  "id": "gridcoin-gui-1401",
+  "project": "gridcoin-community/Gridcoin-Research",
+  "source": "github-issue",
+  "title": "GUI Implementation Fund Match",
+  "description": "Modern framework GUI rebuild for Gridcoin",
+  "reward": {
+    "amount": "TBD",
+    "currency": "GRC",
+    "status": "pending_verification"
+  },
+  "deadline": "TBD",
+  "submission_method": "discord",
+  "coding_agent_fit": "potential",
+  "estimated_effort": "1-8 hours",
+  "competition": {
+    "assignees": 0,
+    "open_prs": 0,
+    "notes": "No visible competition"
+  },
+  "metadata": {
+    "last_updated": "2026-09-28T14:26:52Z",
+    "issue_url": "https://github.com/gridcoin-community/Gridcoin-Research/issues/1401",
+    "comments": 24
+  }
+}
