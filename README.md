@@ -97,6 +97,8 @@ BountyScout/
 
 无需额外配置。工作流会在本仓库创建带 `bounty-alert` 标签的结构化 Issue；扫描器会排除这些通知 Issue，避免反馈循环。
 
+注意：这些 `bounty-alert` Issue 是关于**外部仓库**机会的扫描结果通知，不是本仓库的 bug 或功能请求。请勿将其当作需要在本仓库修复的问题处理；如需认领任务，请打开通知中的原始链接。
+
 ### Telegram
 
 在仓库的 **Settings → Secrets and variables → Actions** 添加：
